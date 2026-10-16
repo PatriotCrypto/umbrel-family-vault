@@ -2,7 +2,7 @@ manifestVersion: 1
 id: fvault-family-vault
 category: files
 name: Family Vault
-version: "0.4.1"
+version: "0.5.0"
 tagline: A private, encrypted home for your family's important documents
 description: >-
   Family Vault keeps your family's important papers in one place that only you control: passports, insurance policies,
@@ -25,7 +25,7 @@ port: 3921
 gallery: []
 path: ""
 releaseNotes: >-
-  The Driver's License quick view now only shows documents titled Driver's License or Driver's Permit.
+  Net worth tracker on the Finance page (assets, debts, monthly snapshots, goals, paste from a spreadsheet), bulk import of passwords and contacts from CSV templates, clickable dashboard boxes and pictures, Coming Up limited to the next 90 days, and more reliable file previews.
 submitter: PatriotCrypto
 submission: https://github.com/PatriotCrypto/umbrel-family-vault
 dependencies: []

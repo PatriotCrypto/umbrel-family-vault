@@ -18,6 +18,12 @@ Your passports, insurance policies, tax returns, wills and medical records stay 
 - Drop files into the Inbox: the category, person and title are guessed from the file name, and you accept or change them
 - Thumbnails and a full preview (images, multi-page PDFs and text files) without leaving the page
 
+**Track your net worth**
+- A Finance tab for assets (investment, shares, price, total, category, location), debts (balance, monthly payment, rate, pay-off date) and your net worth
+- Monthly snapshots saved automatically, with a comparison to last month and a trend chart
+- Goals such as "net worth $3,000,000" or "get total debt under $50,000", with progress shown on the home page
+- Paste in your existing spreadsheet (Google Sheets or Excel), update a month's prices in one screen, and export everything to CSV
+
 **Stay on top of renewals**
 - Expiry dates and reminders, grouped into Overdue, Next 30 days and Later
 - A Renew button on anything expired or expiring soon: set the new date and upload the replacement document or photo
@@ -30,7 +36,9 @@ Your passports, insurance policies, tax returns, wills and medical records stay 
 
 **Everything else**
 - Logins stored in the Passwords category, with a password generator
+- Bulk import of passwords and contacts from a CSV file: download the template, fill it in, upload it (exports from other password managers work too)
 - A printable emergency sheet listing what exists and where, never passwords
+- A dashboard where every box (documents, to review, due soon, net worth) and every person's picture opens the matching page
 - Five themes (Classic, Bright, Midnight, Retro 95 and 8-Bit) and a family name on the home page
 - Auto-lock, change passphrase, and an encrypted one-click backup with restore
 
@@ -48,6 +56,7 @@ Your passports, insurance policies, tax returns, wills and medical records stay 
 - While the vault is unlocked, the decryption key is in the app's memory, so anyone with administrator access to your Umbrel could read it. Lock the vault when you are not using it, and rely on auto-lock.
 - There is one shared passphrase for the whole vault. There are no separate logins per family member and no two-factor sign-in yet.
 - Alerts through ntfy work while the vault is locked, so a small schedule (dates and generic labels; titles only if you opt in) is kept unencrypted, along with your ntfy server, topic and access token if you set one. Anyone who knows your ntfy topic can read your alerts on a public ntfy server, so keep the topic secret or use your own server.
+- Net worth data is encrypted in the vault like everything else. The CSV export and any CSV you import from (especially a passwords file) are plain text on your computer, so delete them when you are done.
 - Tracking a wallet key lets the lookup server see all of that wallet's addresses.
 - This project has not been independently audited. Use a long passphrase (five or more random words is a good choice) and keep backups somewhere other than the Umbrel itself.
 

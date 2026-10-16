@@ -89,11 +89,29 @@ function lock() {
 
 const LISTS = ['people', 'items', 'files', 'reminders', 'contacts', 'bitcoin', 'wallets'];
 const DEFAULT_SETTINGS = { btcLookups: true, btcApi: 'https://mempool.space/api', familyName: '' };
-const EMPTY_DB = () => ({ rev: 0, people: [], items: [], files: [], reminders: [], contacts: [], bitcoin: [], wallets: [], settings: { ...DEFAULT_SETTINGS } });
+const EMPTY_NW = () => ({ assets: [], debts: [], history: [], goals: [] });
+const EMPTY_DB = () => ({ rev: 0, people: [], items: [], files: [], reminders: [], contacts: [], bitcoin: [], wallets: [], networth: EMPTY_NW(), settings: { ...DEFAULT_SETTINGS } });
+
+// Net worth tracker: every field is sanitised, so a bad request cannot store anything unexpected.
+const nstr = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, n);
+const nnum = (v) => { const x = Number(v); return Number.isFinite(x) ? Math.round(x * 1e8) / 1e8 : 0; };
+const nid = (v) => { const x = nstr(v, 64); return /^[\w-]{1,64}$/.test(x) ? x : crypto.randomUUID(); };
+function cleanNetworth(n) {
+  const out = EMPTY_NW();
+  if (!n || typeof n !== 'object') return out;
+  const arr = (a, max) => (Array.isArray(a) ? a.slice(0, max) : []);
+  out.assets = arr(n.assets, 1000).filter((a) => a && typeof a === 'object').map((a) => ({ id: nid(a.id), name: nstr(a.name, 80), category: nstr(a.category, 40), location: nstr(a.location, 80), shares: nnum(a.shares), price: nnum(a.price), notes: nstr(a.notes, 300), personId: nstr(a.personId, 64) }));
+  out.debts = arr(n.debts, 1000).filter((d) => d && typeof d === 'object').map((d) => ({ id: nid(d.id), name: nstr(d.name, 80), category: nstr(d.category, 40), owed: nnum(d.owed), monthly: nnum(d.monthly), rate: nnum(d.rate), payoff: nstr(d.payoff, 30), notes: nstr(d.notes, 300) }));
+  const seen = new Set();
+  out.history = arr(n.history, 1200).filter((h) => h && /^\d{4}-(0[1-9]|1[0-2])$/.test(String(h.month))).map((h) => ({ month: String(h.month), assets: nnum(h.assets), debts: nnum(h.debts), manual: !!h.manual })).filter((h) => (seen.has(h.month) ? false : seen.add(h.month))).sort((a, b) => a.month.localeCompare(b.month));
+  out.goals = arr(n.goals, 100).filter((g) => g && typeof g === 'object').map((g) => ({ id: nid(g.id), name: nstr(g.name, 80), metric: ['net', 'assets', 'debts'].includes(g.metric) ? g.metric : 'net', target: nnum(g.target), start: nnum(g.start), date: /^\d{4}-\d{2}-\d{2}$/.test(String(g.date || '')) ? String(g.date) : '' }));
+  return out;
+}
 function normalizeDb(d) {
   const out = { ...EMPTY_DB(), ...d };
   for (const k of LISTS) if (!Array.isArray(out[k])) out[k] = [];
   out.settings = { ...DEFAULT_SETTINGS, ...(d && d.settings) };
+  out.networth = cleanNetworth(d && d.networth);
   return out;
 }
 async function saveDb() {
@@ -304,6 +322,7 @@ app.put('/api/db', async (req, res) => {
   const next = { rev: state.db.rev + 1 };
   for (const k of LISTS) next[k] = b[k];
   next.settings = cleanSettings(b.settings);
+  next.networth = cleanNetworth(b.networth);
   state.db = next;
   await saveDb();
   collectGarbage();
@@ -356,6 +375,7 @@ app.get('/api/files/:id', async (req, res) => {
   const isPdf = rec.type === 'application/pdf';
   const inlineOk = /^(image\/(png|jpe?g|gif|webp)|application\/pdf|text\/plain)$/.test(rec.type || '');
   res.set({
+    'Cache-Control': 'no-store',
     'Content-Type': inlineOk ? rec.type : 'application/octet-stream',
     'Content-Disposition': `${inlineOk && !req.query.dl ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(safe)}`,
   });

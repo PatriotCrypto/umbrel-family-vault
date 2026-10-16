@@ -295,3 +295,38 @@ button.renew{background:var(--accent);color:var(--accent-ink);border-color:var(-
 [data-theme="classic"] .tile{box-shadow:none}
 [data-theme="classic"] .tile:hover{box-shadow:0 4px 14px rgba(0,0,0,.08)}
 @media(max-width:600px){.tiles{grid-template-columns:repeat(2,1fr);gap:10px}.tile-th{height:120px}}
+
+/* 0.5.0: clickable stats, net worth, imports */
+.stat.link,.avl{cursor:pointer}
+.stat.link:hover{transform:translateY(-2px)}
+.avl{display:inline-flex}
+.stat .dl{font-size:.8em;margin-top:4px;line-height:1.3}
+.up{color:var(--ok);font-weight:700}.down{color:var(--bad);font-weight:700}
+.nw-main{background:var(--accent);color:var(--accent-ink);border-color:var(--line)}
+.nw-main .l{color:inherit;opacity:.85}
+.nw-main .up,.nw-main .down,.nw-main .muted{color:inherit}
+[data-theme="classic"] .nw-main{background:#eaf0fe;color:#111827}
+[data-theme="retro"] #view .nw-main{color:#fff}
+[data-theme="8bit"] .nw-main .l{color:var(--accent-ink)}
+.sec{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:22px}
+.sec h3{margin:0}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 12px}
+@media(max-width:600px){.grid3{grid-template-columns:1fr}}
+.tbl-wrap{overflow-x:auto}
+table.nwt{width:100%;border-collapse:collapse;font-size:.95em}
+.nwt th{text-align:left;font-size:.78em;text-transform:uppercase;letter-spacing:.04em;color:var(--mute);padding:9px 12px;border-bottom:1px solid var(--soft);white-space:nowrap}
+.nwt td{padding:8px 12px;border-bottom:1px solid var(--soft)}
+.nwt .num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.nwt tr.clk{cursor:pointer}.nwt tr.clk:hover{background:var(--panel2)}
+.nwt tr.catrow td{background:var(--panel2);font-weight:700}
+.nwt tfoot td{font-weight:800;border-top:2px solid var(--line);border-bottom:0}
+.nwt.upd input{width:110px;padding:4px 6px;text-align:right}
+svg.trend{width:100%;height:auto;display:block}
+svg.trend .tl{font-size:11px;fill:var(--mute)}
+[data-theme="retro"] #view .nwt th{color:#404040}
+[data-theme="retro"] #view .nwt tr.clk:hover{background:#000080;color:#fff}
+[data-theme="retro"] #view .stat{color:#000}
+[data-theme="retro"] #view .stat .muted{color:#404040}
+[data-theme="retro"] #view .btc-card{color:#fff}
+
+svg.trend{max-height:190px}

@@ -152,11 +152,12 @@ function upcoming() {
   return out.sort((a, b) => a.date.localeCompare(b.date));
 }
 const famName = () => ((db.settings && db.settings.familyName) || '').trim() || 'Welcome home';
-const dueBadge = (d) => {
-  const n = daysUntil(d);
-  if (n < 0) return `<span class="pill bad">${-n}d overdue</span>`;
-  if (n <= 30) return `<span class="pill warn">in ${n}d</span>`;
-  return `<span class="pill">${fmtDate(d)}</span>`;
+const dueBadge = (d, verb = 'Expires') => {
+  const n = daysUntil(d), past = verb === 'Due' ? 'Overdue' : 'Expired';
+  if (n < 0) return `<span class="pill bad">${verb === 'Due' ? `Overdue ${-n}d` : `Expired ${-n}d ago`}</span>`;
+  if (n === 0) return `<span class="pill warn">${verb} today</span>`;
+  if (n <= 30) return `<span class="pill warn">${verb} in ${n}d</span>`;
+  return `<span class="pill">${verb} ${fmtDate(d)}</span>`;
 };
 const avatar = (p, cls = '') => `<div class="avatar ${cls}">${p.photo && fileOf(p.photo) ? `<img src="/api/files/${esc(p.photo)}" alt="">` : esc((p.name || '?')[0].toUpperCase())}</div>`;
 
@@ -196,25 +197,35 @@ async function pdfjs() {
 }
 async function loadPdf(fid) {
   const lib = await pdfjs();
-  const buf = await (await fetchFile(fid)).arrayBuffer();
-  return lib.getDocument({ data: new Uint8Array(buf), standardFontDataUrl: '/vendor/pdfjs/standard_fonts/', isEvalSupported: false, enableXfa: false }).promise;
+  const res = await fetchFile(fid); if (!res.ok) throw new Error('file unavailable');
+  const u8 = new Uint8Array(await res.arrayBuffer());
+  if (!new TextDecoder('latin1').decode(u8.subarray(0, 1024)).includes('%PDF-')) throw new Error('not a PDF');   // corrupt files can make the reader hang
+  const task = lib.getDocument({ data: u8, standardFontDataUrl: '/vendor/pdfjs/standard_fonts/', isEvalSupported: false, enableXfa: false });
+  task.onPassword = () => task.destroy();                                                                          // password-protected: no preview, and never wait for a password
+  try { return await withTimeout(task.promise, 30000); } catch (e) { try { task.destroy(); } catch {} throw e; }
 }
 const isImg = (t) => /^image\/(png|jpe?g|gif|webp)$/.test(t || '');
 const isPdf = (t) => t === 'application/pdf';
-const thumbCache = new Map();
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+const thumbCache = new Map(), thumbTries = new Map();
 let thumbBusy = 0; const thumbQ = [];
 function thumbPump() {
-  while (thumbBusy < 2 && thumbQ.length) {
+  while (thumbBusy < 3 && thumbQ.length) {
     const job = thumbQ.shift(); thumbBusy++;
-    makeThumb(job.rec).then(job.done).catch(() => job.done(null)).finally(() => { thumbBusy--; thumbPump(); });
+    withTimeout(makeThumb(job.rec), 45000).then(job.done, () => job.done(null)).finally(() => { thumbBusy--; thumbPump(); });
   }
+}
+async function imageEl(rec) {
+  const blob = await (await fetchFile(rec.id)).blob();
+  const url = URL.createObjectURL(blob);
+  try { const img = new Image(); img.src = url; await img.decode(); return img; } finally { setTimeout(() => URL.revokeObjectURL(url), 5000); }
 }
 async function makeThumb(rec) {
   const c = document.createElement('canvas');
   if (isImg(rec.type)) {
-    const bmp = await createImageBitmap(await (await fetchFile(rec.id)).blob());
-    const s = 200 / Math.max(bmp.width, bmp.height); c.width = Math.max(1, Math.round(bmp.width * s)); c.height = Math.max(1, Math.round(bmp.height * s));
-    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    const img = await imageEl(rec), w = img.naturalWidth, h = img.naturalHeight;
+    const s = Math.min(1, 200 / Math.max(w, h)); c.width = Math.max(1, Math.round(w * s)); c.height = Math.max(1, Math.round(h * s));
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
   } else if (isPdf(rec.type)) {
     const pdf = await loadPdf(rec.id), page = await pdf.getPage(1), v0 = page.getViewport({ scale: 1 }), s = 200 / Math.max(v0.width, v0.height), v = page.getViewport({ scale: s });
     c.width = Math.round(v.width); c.height = Math.round(v.height);
@@ -229,34 +240,48 @@ function hydrateThumbs(root) {
     if (!e.isIntersecting) return;
     const el = e.target; thumbObs.unobserve(el);
     const rec = fileOf(el.dataset.fid); if (!rec) return;
-    const put = (u) => { if (u) el.innerHTML = `<img src="${u}" alt="">`; };
+    const put = (u) => { if (u && el.isConnected) el.innerHTML = `<img src="${u}" alt="">`; };
     if (thumbCache.has(rec.id)) return put(thumbCache.get(rec.id));
-    thumbQ.push({ rec, done: (u) => { thumbCache.set(rec.id, u); put(u); } }); thumbPump();
-  }), { rootMargin: '200px' });
+    if ((thumbTries.get(rec.id) || 0) >= 3) return;          // give up after a few failures this session
+    thumbQ.push({ rec, done: (u) => { if (u) thumbCache.set(rec.id, u); else thumbTries.set(rec.id, (thumbTries.get(rec.id) || 0) + 1); put(u); } }); thumbPump();
+  }), { rootMargin: '300px' });
   root.querySelectorAll('.th[data-fid],.tile-th[data-fid]').forEach((el) => thumbObs.observe(el));
 }
+let activePdf = null;
 async function buildPreview(host, rec) {
+  if (activePdf) { try { activePdf.destroy(); } catch {} activePdf = null; }
   host.innerHTML = '';
   if (!rec) { host.innerHTML = '<div class="empty">No file attached yet.</div>'; return; }
   const url = fileUrl(rec.id);
-  const bar = `<div class="pv-bar"><b>${esc(rec.name)}</b><span class="muted">${fmtSize(rec.size)}</span><span class="grow"></span><a href="${url}" target="_blank" rel="noopener">Open</a> · <a href="${url}?dl=1">Download</a></div>`;
-  if (isImg(rec.type)) host.innerHTML = bar + `<div class="pv-scroll"><img class="pv-img" src="${url}" alt=""></div>`;
-  else if (rec.type === 'text/plain') { host.innerHTML = bar + '<div class="pv-scroll"><pre class="pv-txt"></pre></div>'; $('.pv-txt', host).textContent = (await (await fetchFile(rec.id)).text()).slice(0, 30000); }
-  else if (isPdf(rec.type)) {
+  const bar = `<div class="pv-bar"><b>${esc(rec.name)}</b><span class="muted">${fmtSize(rec.size)}</span><span class="grow"></span><a href="${url}" target="_blank" rel="noopener">Open</a> · <a href="${url}${url.startsWith('blob:') ? '' : '?dl=1'}" ${url.startsWith('blob:') ? `download="${esc(rec.name)}"` : ''}>Download</a></div>`;
+  const fail = (msg) => { host.innerHTML = bar + `<div class="empty">${msg}<br><button class="small" id="pv-retry" style="margin-top:8px">Try again</button></div>`; const r = $('#pv-retry', host); if (r) r.onclick = () => buildPreview(host, rec); };
+  if (isImg(rec.type)) {
+    host.innerHTML = bar + '<div class="pv-scroll"><div class="pv-load muted">Loading preview…</div><img class="pv-img hidden" alt=""></div>';
+    const img = $('.pv-img', host);
+    img.onload = () => { $('.pv-load', host)?.remove(); img.classList.remove('hidden'); };
+    img.onerror = () => fail('Could not display this image here. Use Open or Download.');
+    img.src = url;
+  } else if (rec.type === 'text/plain') {
+    host.innerHTML = bar + '<div class="pv-scroll"><pre class="pv-txt">Loading…</pre></div>';
+    try { $('.pv-txt', host).textContent = (await (await fetchFile(rec.id)).text()).slice(0, 30000); } catch { fail('Could not load this file.'); }
+  } else if (isPdf(rec.type)) {
     host.innerHTML = bar + '<div class="pv-scroll"><div class="pv-load muted">Loading preview…</div></div>';
     try {
-      const pdf = await loadPdf(rec.id), box = $('.pv-scroll', host);
-      const w = Math.max(280, box.clientWidth - 8);
-      box.innerHTML = '';
-      for (let n = 1; n <= Math.min(pdf.numPages, 30); n++) {
-        const page = await pdf.getPage(n), v0 = page.getViewport({ scale: 1 }), v = page.getViewport({ scale: (w / v0.width) * (window.devicePixelRatio || 1) });
-        const c = document.createElement('canvas'); c.className = 'pv-page'; c.width = Math.round(v.width); c.height = Math.round(v.height);
+      const pdf = await withTimeout(loadPdf(rec.id), 90000); activePdf = pdf;
+      const box = $('.pv-scroll', host); box.innerHTML = '';
+      const w = Math.max(280, box.clientWidth - 8), dpr = Math.min(2, window.devicePixelRatio || 1), n = Math.min(pdf.numPages, 50);
+      const first = await pdf.getPage(1), ratio = first.getViewport({ scale: 1 }).height / first.getViewport({ scale: 1 }).width;
+      const draw = async (num, c) => {
+        if (c.dataset.done) return; c.dataset.done = '1';
+        const page = await pdf.getPage(num), v0 = page.getViewport({ scale: 1 }), v = page.getViewport({ scale: (w / v0.width) * dpr });
+        c.width = Math.round(v.width); c.height = Math.round(v.height); c.style.aspectRatio = `${v.width} / ${v.height}`;
         const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
-        box.appendChild(c); await page.render({ canvasContext: ctx, viewport: v }).promise;
-      }
-      if (pdf.numPages > 30) box.insertAdjacentHTML('beforeend', `<div class="muted" style="padding:8px">Showing the first 30 of ${pdf.numPages} pages. Use Open for the full file.</div>`);
-      pdf.destroy();
-    } catch { $('.pv-scroll', host).innerHTML = '<div class="empty">Could not draw a preview. Use Open or Download.</div>'; }
+        await page.render({ canvasContext: ctx, viewport: v }).promise;
+      };
+      const obs = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { obs.unobserve(e.target); draw(+e.target.dataset.n, e.target).catch(() => {}); } }), { root: box, rootMargin: '400px' });
+      for (let i = 1; i <= n; i++) { const c = document.createElement('canvas'); c.className = 'pv-page'; c.dataset.n = i; c.width = 10; c.height = 10; c.style.aspectRatio = `1 / ${ratio}`; box.appendChild(c); obs.observe(c); }
+      if (pdf.numPages > 50) box.insertAdjacentHTML('beforeend', `<div class="muted" style="padding:8px">Showing the first 50 of ${pdf.numPages} pages. Use Open for the full file.</div>`);
+    } catch { fail('The preview took too long or could not be drawn.'); }
   } else host.innerHTML = bar + '<div class="empty">No preview for this type of file. Use Download.</div>';
 }
 
@@ -275,7 +300,7 @@ function render() {
   renderNav();
   const v = $('#view');
   if (query) renderSearch(v);
-  else ({ home: renderHome, inbox: renderInbox, reminders: renderReminders, cat: renderCat, kind: renderKind, contacts: renderContacts, people: renderPeople, person: renderPerson, bitcoin: renderBitcoin, sheet: renderSheet, settings: renderSettings }[view.name] || renderHome)(v);
+  else ({ home: renderHome, inbox: renderInbox, reminders: renderReminders, cat: renderCat, kind: renderKind, all: renderAll, contacts: renderContacts, people: renderPeople, person: renderPerson, bitcoin: renderBitcoin, sheet: renderSheet, settings: renderSettings }[view.name] || renderHome)(v);
   hydrateThumbs(v);
 }
 
@@ -329,26 +354,27 @@ function byPerson(items) {
 
 // ---------- views ----------
 function renderHome(v) {
-  const up = upcoming().slice(0, 5), n = inbox().length, due = upcoming().filter((u) => daysUntil(u.date) <= 30).length;
+  const up = upcoming().filter((u) => daysUntil(u.date) <= 90), n = inbox().length, due = upcoming().filter((u) => daysUntil(u.date) <= 30).length;
   const recent = db.items.filter((i) => i.reviewed !== false).slice().sort((a, b) => (b.created || '').localeCompare(a.created || '')).slice(0, 6);
-  v.innerHTML = `<div class="head"><div><h2 class="fam-title">${esc(famName())}</h2><div class="muted">Everything here is encrypted with your passphrase.</div></div><div class="avs">${db.people.slice(0, 7).map((p) => avatar(p, 'sm')).join('')}</div></div>
+  v.innerHTML = `<div class="head"><div><h2 class="fam-title">${esc(famName())}</h2><div class="muted">Everything here is encrypted with your passphrase.</div></div><div class="avs">${db.people.slice(0, 7).map((p) => `<span class="avl" data-person="${p.id}" title="${esc(p.name)}">${avatar(p, 'sm')}</span>`).join('')}</div></div>
     ${S.legacy ? `<div class="suggest" style="margin-bottom:14px"><div class="grow"><b>Upgrade your vault's encryption</b><div class="muted">This vault uses the older, weaker key setup. The upgrade takes a minute, keeps all your data, and makes the passphrase much harder to crack.</div></div><button class="primary" id="up1">Upgrade now</button></div>` : ''}
     <div class="stats">
-      <div class="stat"><div class="n">${db.items.filter((i) => i.reviewed !== false).length}</div><div class="l">Documents</div></div>
-      <div class="stat"><div class="n">${n}</div><div class="l">To review</div></div>
-      <div class="stat"><div class="n">${due}</div><div class="l">Due in 30 days</div></div>
+      <div class="stat link" data-go="all"><div class="n">${db.items.filter((i) => i.reviewed !== false).length}</div><div class="l">Documents</div></div>
+      <div class="stat link" data-go="inbox"><div class="n">${n}</div><div class="l">To review</div></div>
+      <div class="stat link" data-go="reminders"><div class="n">${due}</div><div class="l">Due in 30 days</div></div>
       ${db.wallets.length ? `<div class="stat btc-card" id="btc-home" style="cursor:pointer"><div class="n">₿ …</div><div class="l">Bitcoin tracked</div></div>` : ''}
     </div>
     ${n ? `<div class="suggest" style="margin-top:14px"><div class="grow"><b>${n} new file${n > 1 ? 's' : ''} to review</b><div class="muted">Check the suggested category and person, then accept.</div></div><button class="primary" id="gi">Review</button></div>` : ''}
     <div class="drop" id="drop">Drop files here or click to upload</div>
+    ${nwHome()}
     <h3>Quick views</h3>${quickLinks()}
-    <h3>Coming up</h3><div class="list">${up.length ? up.map((u) => `<div class="row"><span class="th plain">⏰</span><div class="grow"><div class="t">${esc(u.title)}</div></div>${dueBadge(u.date)}</div>`).join('') : '<div class="empty">Nothing due. Add an expiry date to a document or create a reminder.</div>'}</div>
+    <h3>Coming up <span class="muted" style="font-size:.7em;font-weight:400">next 90 days</span></h3><div class="list">${up.length ? up.map((u) => u.kind === 'item' ? itemRow(db.items.find((i) => i.id === u.id)) : `<div class="row" data-go="reminders"><span class="th plain">⏰</span><div class="grow"><div class="t">${esc(u.title)}</div><div class="s">Reminder</div></div>${dueBadge(u.date, 'Due')}</div>`).join('') : '<div class="empty">Nothing expiring in the next 90 days.</div>'}</div>
     <h3>People</h3><div class="cards">${db.people.map(personCard).join('')}<div class="card" id="addp" style="display:flex;align-items:center;justify-content:center;color:var(--mute)">+ Add a person</div></div>
     <h3>Recently added</h3><div class="list">${recent.length ? recent.map((i) => itemRow(i)).join('') : '<div class="empty">No documents yet.</div>'}</div>`;
   if ($('#gi')) $('#gi').onclick = () => go({ name: 'inbox' });
   if ($('#up1')) $('#up1').onclick = upgradeDialog;
   $('#addp').onclick = () => personDialog();
-  bindPersonCards(v); bindItems(v); bindQuick(v); bindDrop($('#drop'));
+  bindPersonCards(v); bindItems(v); bindQuick(v); bindDrop($('#drop')); bindGo(v); bindNwHome(v);
   if (db.wallets.length) {
     $('#btc-home').onclick = () => go({ name: 'bitcoin' });
     loadBtc().then((s) => {
@@ -358,20 +384,34 @@ function renderHome(v) {
     });
   }
 }
+const GO = { all: { name: 'all' }, inbox: { name: 'inbox' }, reminders: { name: 'reminders' }, nw: { name: 'cat', cat: 'Finance', tab: 'nw' } };
+function bindGo(root) { root.querySelectorAll('[data-go]').forEach((e) => (e.onclick = () => go(GO[e.dataset.go]))); }
 const quickLinks = () => `<div class="qv"><span class="muted">Quick views:</span>${KINDS.map((k) => `<button class="chip-btn" data-kind="${k.id}">${k.icon} ${esc(k.label)} <span class="count2">${db.items.filter((i) => i.reviewed !== false && docKind(i) === k.id).length}</span></button>`).join('')}</div>`;
 function bindQuick(root) { root.querySelectorAll('[data-kind]').forEach((b) => (b.onclick = () => go({ name: 'kind', kind: b.dataset.kind }))); }
 const personCard = (p) => `<div class="card" data-person="${p.id}">${avatar(p)}<div class="t">${esc(p.name)}</div><div class="muted">${db.items.filter((i) => i.personId === p.id).length} items</div></div>`;
 function bindPersonCards(r) { r.querySelectorAll('[data-person]').forEach((e) => (e.onclick = () => go({ name: 'person', id: e.dataset.person }))); }
 
+const finTabs = (tab) => `<div class="seg"><button data-tab="nw" class="${tab === 'nw' ? 'on' : ''}">💰 Net worth</button><button data-tab="docs" class="${tab === 'docs' ? 'on' : ''}">📄 Documents</button></div>`;
 function renderCat(v) {
+  if (view.cat === 'Finance') { view.tab = view.tab || (hasNw() ? 'nw' : 'docs'); if (view.tab === 'nw') return renderNetWorth(v); }
   const items = db.items.filter((i) => i.category === view.cat && i.reviewed !== false);
-  v.innerHTML = `<div class="head"><h2>${CAT_ICON[view.cat]} ${esc(view.cat)}</h2><div class="hbtns">${layoutToggle()}<button class="primary" id="a">+ Add to ${esc(view.cat)}</button></div></div>
+  v.innerHTML = `<div class="head"><h2>${CAT_ICON[view.cat]} ${esc(view.cat)}</h2><div class="hbtns">${view.cat === 'Finance' ? finTabs('docs') : ''}${layoutToggle()}${view.cat === 'Passwords' ? '<button id="imp">⬆ Import</button>' : ''}<button class="primary" id="a">+ Add to ${esc(view.cat)}</button></div></div>
     <div class="muted">${view.cat === 'Passwords' ? 'Logins are stored inside the encrypted vault. ' : ''}Grouped by family member.</div>
     ${view.cat === 'Family' ? quickLinks() : ''}
     <div class="drop" id="drop" style="margin-top:12px">Drop files here to add to ${esc(view.cat)}</div>
     ${items.length ? byPerson(items) : '<div class="list"><div class="empty">Nothing here yet.</div></div>'}`;
   $('#a').onclick = () => itemDialog(null, { category: view.cat });
-  bindItems(v); bindLayout(v); bindQuick(v); bindDrop($('#drop'), { cat: view.cat });
+  if ($('#imp')) $('#imp').onclick = () => importDialog('passwords');
+  bindItems(v); bindLayout(v); bindQuick(v); bindFinTabs(v); bindDrop($('#drop'), { cat: view.cat });
+}
+
+function renderAll(v) {
+  const cat = view.filter || '';
+  const items = db.items.filter((i) => i.reviewed !== false && (!cat || i.category === cat));
+  v.innerHTML = `<div class="head"><div><h2>🗂️ All documents</h2><div class="muted">${items.length} document${items.length === 1 ? '' : 's'}, grouped by family member.</div></div><div class="hbtns"><select id="fc" style="width:auto"><option value="">All categories</option>${opts(CATS.map((c) => [c, c]), cat)}</select>${layoutToggle()}</div></div>
+    ${items.length ? byPerson(items) : '<div class="list"><div class="empty">No documents here yet.</div></div>'}`;
+  $('#fc').onchange = (e) => { view = { name: 'all', filter: e.target.value }; render(); };
+  bindItems(v); bindLayout(v);
 }
 
 function renderKind(v) {
@@ -409,11 +449,11 @@ function renderInbox(v) {
 
 function remTile(u) {
   if (u.kind === 'item') return itemTile(db.items.find((i) => i.id === u.id), {});
-  return `<div class="tile rem" data-rid="${u.id}"><div class="tile-th plain">⏰</div><div class="tile-b"><div class="t">${esc(u.title)}</div><div class="s">Reminder</div><div class="tile-f">${dueBadge(u.date)}<button class="small chk">Done</button></div></div></div>`;
+  return `<div class="tile rem" data-rid="${u.id}"><div class="tile-th plain">⏰</div><div class="tile-b"><div class="t">${esc(u.title)}</div><div class="s">Reminder</div><div class="tile-f">${dueBadge(u.date, 'Due')}<button class="small chk">Done</button></div></div></div>`;
 }
 function remRow(u) {
   if (u.kind === 'item') return itemRow(db.items.find((i) => i.id === u.id), {});
-  return `<div class="row" data-rid="${u.id}"><span class="th plain">⏰</span><div class="grow"><div class="t">${esc(u.title)}</div><div class="s">Reminder</div></div>${dueBadge(u.date)}<button class="small chk">Done</button></div>`;
+  return `<div class="row" data-rid="${u.id}"><span class="th plain">⏰</span><div class="grow"><div class="t">${esc(u.title)}</div><div class="s">Reminder</div></div>${dueBadge(u.date, 'Due')}<button class="small chk">Done</button></div>`;
 }
 function renderReminders(v) {
   const up = upcoming(), done = db.reminders.filter((r) => r.done);
@@ -429,9 +469,9 @@ function renderReminders(v) {
 
 const contactRow = (c) => `<div class="row" data-c="${c.id}"><span class="th plain">📇</span><div class="grow"><div class="t">${esc(c.name)}</div><div class="s">${esc([c.role, c.phone, c.email].filter(Boolean).join(' · '))}</div></div></div>`;
 function renderContacts(v) {
-  v.innerHTML = `<div class="head"><h2>📇 Contacts</h2><button class="primary" id="a">+ Add contact</button></div>
+  v.innerHTML = `<div class="head"><h2>📇 Contacts</h2><div class="hbtns"><button id="imp">⬆ Import</button><button class="primary" id="a">+ Add contact</button></div></div>
     <div class="muted">Doctors, lawyers, accountants, agents: the people you call when it matters.</div><div class="list" style="margin-top:12px">${db.contacts.length ? db.contacts.slice().sort((a, b) => a.name.localeCompare(b.name)).map(contactRow).join('') : '<div class="empty">No contacts yet.</div>'}</div>`;
-  $('#a').onclick = () => contactDialog();
+  $('#a').onclick = () => contactDialog(); $('#imp').onclick = () => importDialog('contacts');
   v.querySelectorAll('[data-c]').forEach((e) => (e.onclick = () => contactDialog(db.contacts.find((c) => c.id === e.dataset.c))));
 }
 
@@ -567,6 +607,7 @@ async function renderSettings(v) {
 // ---------- dialogs ----------
 function dialog(html, bind, wide) {
   const d = $('#dlg'); d.className = wide ? 'wide' : ''; d.innerHTML = `<div class="dlg">${html}</div>`;
+  d.onclose = () => { if (activePdf) { try { activePdf.destroy(); } catch {} activePdf = null; } };
   d.querySelectorAll('[data-close]').forEach((b) => (b.onclick = () => d.close()));
   if (!d.open) d.showModal();
   bind && bind(d);
@@ -638,6 +679,354 @@ function renewDialog(it) {
       } catch (x) { btn.disabled = false; $('#e', d).textContent = x.message; }
     };
   });
+}
+
+// ---------- bulk import from a spreadsheet (CSV) ----------
+function csvParse(text) {
+  text = text.replace(/^﻿/, '');
+  const head = text.split(/\r?\n/)[0] || '';
+  const delim = [',', ';', '\t'].map((d) => [d, head.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+  const rows = []; let row = [], f = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+    else if (c === '"') q = true;
+    else if (c === delim) { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(f); f = ''; rows.push(row); row = []; }
+    else f += c;
+  }
+  if (f !== '' || row.length) { row.push(f); rows.push(row); }
+  return rows.filter((r) => r.some((x) => x.trim() !== ''));
+}
+const csvCell = (v) => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+function downloadText(name, text) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' })); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
+const IMPORTS = {
+  passwords: {
+    title: 'Import passwords', file: 'family-vault-passwords-template.csv', noun: 'login',
+    template: 'Title,Website,Username,Password,Notes,Belongs to,Expires\nNetflix,https://netflix.com,family@example.com,CHANGE-ME,Shared family account,,\nBank of Example,https://bank.example.com,wyley,CHANGE-ME,Security question hint: first pet,Wyley,\n',
+    cols: { title: ['title', 'name', 'accountname', 'site', 'sitename', 'account', 'label'], url: ['website', 'url', 'loginuri', 'siteurl', 'weburl', 'link', 'web'], username: ['username', 'loginusername', 'user', 'login', 'userid', 'email'], password: ['password', 'loginpassword', 'pass'], notes: ['notes', 'note', 'comments', 'extra', 'loginnotes'], person: ['belongsto', 'person', 'owner', 'familymember', 'for'], expires: ['expires', 'expiry', 'expirationdate', 'expirydate'] },
+    warn: 'This file holds passwords in plain text. Delete it (and empty your trash) as soon as the import is done.',
+  },
+  contacts: {
+    title: 'Import contacts', file: 'family-vault-contacts-template.csv', noun: 'contact',
+    template: 'Name,Role,Phone,Email,Notes\nJane Smith,Attorney,555-123-4567,jane@example.com,Handles our wills\nDr. Lee,Family doctor,555-987-6543,,\n',
+    cols: { name: ['name', 'fullname', 'contact', 'contactname'], role: ['role', 'title', 'relationship', 'jobtitle', 'type', 'company', 'organization'], phone: ['phone', 'phonenumber', 'mobile', 'cell', 'tel', 'telephone'], email: ['email', 'emailaddress', 'mail'], notes: ['notes', 'note', 'comments', 'address'] },
+  },
+};
+function mapCsv(kind, rows) {
+  const spec = IMPORTS[kind], norm2 = (x) => x.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const hdr = rows[0].map(norm2), idx = {}, used = new Set();
+  for (const [field, aliases] of Object.entries(spec.cols)) { const i = hdr.findIndex((h, n) => !used.has(n) && aliases.includes(h)); if (i >= 0) { idx[field] = i; used.add(i); } }
+  const get = (r, f) => (idx[f] === undefined ? '' : String(r[idx[f]] ?? '').trim());
+  return { idx, rows: rows.slice(1).map((r) => Object.fromEntries(Object.keys(spec.cols).map((f) => [f, get(r, f)]))) };
+}
+function personByName(n) {
+  n = (n || '').trim().toLowerCase(); if (!n) return '';
+  const exact = db.people.find((p) => p.name.toLowerCase() === n); if (exact) return exact.id;
+  const part = db.people.filter((p) => p.name.toLowerCase().split(/\s+/)[0] === n.split(/\s+/)[0]); return part.length === 1 ? part[0].id : '';
+}
+function importDialog(kind) {
+  const spec = IMPORTS[kind]; let parsed = null;
+  dialog(`<h2>${spec.title}</h2>
+    <p class="muted">Fill in the template in Excel or Google Sheets, save it as CSV, then upload it here. Exports from other password managers also work, as long as the column names are similar.</p>
+    <div class="btns" style="justify-content:flex-start;margin-top:0"><button type="button" id="tpl">⬇ Download template</button><button type="button" class="primary" id="up">⬆ Choose filled-in file</button></div>
+    ${spec.warn ? `<p class="muted" style="font-size:.85em">${spec.warn}</p>` : ''}
+    <div id="sum"></div><div class="err muted" id="e"></div>
+    <div class="btns"><button type="button" class="ghost" data-close>Close</button><button class="primary hidden" id="go">Import</button></div>`, (d) => {
+    $('#tpl', d).onclick = () => downloadText(spec.file, spec.template);
+    $('#up', d).onclick = () => {
+      const i = document.createElement('input'); i.type = 'file'; i.accept = '.csv,.tsv,.txt,text/csv,text/plain';
+      i.onchange = async () => {
+        if (!i.files[0]) return; $('#e', d).textContent = '';
+        try {
+          if (i.files[0].size > 5e6) throw new Error('That file is too large for an import.');
+          const rows = csvParse(await i.files[0].text());
+          if (rows.length < 2) throw new Error('That file has no rows to import.');
+          const m = mapCsv(kind, rows);
+          const keyField = kind === 'passwords' ? (m.idx.title !== undefined || m.idx.url !== undefined) : m.idx.name !== undefined;
+          if (!keyField) throw new Error(kind === 'passwords' ? 'Could not find a Title (or Website) column. Use the template for the right column names.' : 'Could not find a Name column. Use the template for the right column names.');
+          const ok = m.rows.filter((r) => (kind === 'passwords' ? r.title || r.url : r.name));
+          if (ok.length > 2000) throw new Error('Please import at most 2000 rows at a time.');
+          parsed = { ok, skipped: m.rows.length - ok.length };
+          $('#sum', d).innerHTML = `<div class="suggest" style="margin:10px 0"><div class="grow"><b>${ok.length} ${spec.noun}${ok.length === 1 ? '' : 's'} ready to import</b>${parsed.skipped ? `<div class="muted">${parsed.skipped} row${parsed.skipped === 1 ? '' : 's'} skipped (nothing to name them by).</div>` : ''}
+            <div class="muted" style="margin-top:6px">${ok.slice(0, 4).map((r) => esc(kind === 'passwords' ? (r.title || r.url) : r.name)).join(', ')}${ok.length > 4 ? ', …' : ''}</div>
+            <label class="inl" style="margin-top:8px"><input type="checkbox" id="dd" checked style="width:auto"> Skip ones that are already in the vault</label></div></div>`;
+          $('#go', d).classList.toggle('hidden', !ok.length); $('#go', d).textContent = `Import ${ok.length}`;
+        } catch (x) { parsed = null; $('#sum', d).innerHTML = ''; $('#go', d).classList.add('hidden'); $('#e', d).textContent = x.message; }
+      };
+      i.click();
+    };
+    $('#go', d).onclick = async () => {
+      if (!parsed) return;
+      const dedupe = $('#dd', d).checked, n0 = parsed.ok.length; let added = 0;
+      const low = (x) => String(x || '').trim().toLowerCase();
+      if (kind === 'passwords') {
+        const have = new Set(db.items.filter((i) => i.category === 'Passwords').map((i) => low(i.title) + '|' + low(i.username)));
+        for (const r of parsed.ok) {
+          let title = r.title; if (!title) { try { title = new URL(/^https?:/i.test(r.url) ? r.url : 'https://' + r.url).hostname.replace(/^www\./, ''); } catch { title = r.url; } }
+          if (dedupe && have.has(low(title) + '|' + low(r.username))) continue;
+          have.add(low(title) + '|' + low(r.username));
+          const ex = /^\d{4}-\d{2}-\d{2}$/.test(r.expires) ? r.expires : '';
+          db.items.push({ id: uid(), title: title.slice(0, 140), category: 'Passwords', personId: personByName(r.person), notes: r.notes, expires: ex, files: [], url: r.url, username: r.username, password: r.password, reviewed: true, created: today() }); added++;
+        }
+      } else {
+        const have = new Set(db.contacts.map((c) => low(c.name) + '|' + low(c.email || c.phone)));
+        for (const r of parsed.ok) {
+          if (dedupe && have.has(low(r.name) + '|' + low(r.email || r.phone))) continue;
+          have.add(low(r.name) + '|' + low(r.email || r.phone));
+          db.contacts.push({ id: uid(), name: r.name.slice(0, 80), role: r.role, phone: r.phone, email: r.email, notes: r.notes }); added++;
+        }
+      }
+      try { await save(); d.close(); render(); toast(`Imported ${added} ${spec.noun}${added === 1 ? '' : 's'}${n0 - added ? ` (${n0 - added} already existed)` : ''}`); }
+      catch (x) { $('#e', d).textContent = x.message; }
+    };
+  });
+}
+
+// ---------- net worth tracker ----------
+const NW = () => (db.networth ||= { assets: [], debts: [], history: [], goals: [] });
+const hasNw = () => NW().assets.length > 0 || NW().debts.length > 0;
+const assetTotal = (a) => (a.shares || 0) * (a.price || 0);
+const r2 = (n) => Math.round(n * 100) / 100;
+const nwTotals = () => { const A = r2(NW().assets.reduce((s, a) => s + assetTotal(a), 0)), D = r2(NW().debts.reduce((s, d) => s + (d.owed || 0), 0)); return { A, D, N: r2(A - D) }; };
+const monthNow = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+const monthLabel = (m) => new Date(m + '-01T00:00:00').toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+const prevSnap = () => NW().history.filter((h) => h.month < monthNow()).slice(-1)[0];
+const money = (n, dec = 0) => (n || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: dec, maximumFractionDigits: dec });
+const fmtNum = (n) => (n || 0).toLocaleString(undefined, { maximumFractionDigits: 8 });
+const pnum = (x) => { x = String(x ?? '').trim(); if (!x || x === '?') return 0; const neg = /^\(.*\)$/.test(x) || x.startsWith('-'); const n = parseFloat(x.replace(/[^0-9.]/g, '')); return Number.isNaN(n) ? 0 : neg ? -n : n; };
+function snapshotNow() {
+  if (!hasNw()) return;
+  const t = nwTotals(), m = monthNow(), h = NW().history, i = h.findIndex((x) => x.month === m), rec = { month: m, assets: t.A, debts: t.D };
+  if (i >= 0) h[i] = rec; else h.push(rec);
+  h.sort((a, b) => a.month.localeCompare(b.month));
+}
+async function saveNw() { snapshotNow(); await save(); }
+const deltaHtml = (cur, prev, goodUp = true) => {
+  if (prev == null) return '<span class="muted">First month tracked</span>';
+  const d = cur - prev; if (Math.abs(d) < 0.5) return '<span class="muted">No change vs last month</span>';
+  const pct = prev ? ` (${((d / Math.abs(prev)) * 100).toFixed(1)}%)` : '';
+  return `<span class="${(goodUp ? d > 0 : d < 0) ? 'up' : 'down'}">${d > 0 ? '▲' : '▼'} ${money(Math.abs(d))}${pct}</span> <span class="muted">vs last month</span>`;
+};
+function goalProgress(g) {
+  const t = nwTotals(), cur = g.metric === 'assets' ? t.A : g.metric === 'debts' ? t.D : t.N, start = g.start ?? cur;
+  const debt = g.metric === 'debts', done = debt ? cur <= g.target : cur >= g.target;
+  let p = debt ? (start === g.target ? (done ? 1 : 0) : (start - cur) / (start - g.target)) : (start === g.target ? (done ? 1 : 0) : (cur - start) / (g.target - start));
+  return { cur, done, p: done ? 1 : Math.max(0, Math.min(1, p)) };
+}
+const METRIC = { net: 'Net worth', assets: 'Total assets', debts: 'Total debt' };
+function goalRow(g) {
+  const gp = goalProgress(g);
+  return `<div class="row goal" data-goal="${g.id}" style="display:block"><div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(g.name)}</b><span class="muted">${gp.done ? '🎉 Reached' : Math.round(gp.p * 100) + '%'}</span></div><div class="meter"><i class="${gp.done ? 'good' : 'mid'}" style="width:${Math.round(gp.p * 100)}%"></i></div><div class="s">${METRIC[g.metric]} ${money(gp.cur)} · goal ${g.metric === 'debts' ? 'under ' : ''}${money(g.target)}${g.date ? ' by ' + fmtDate(g.date) : ''}</div></div>`;
+}
+function nwHome() {
+  if (!hasNw()) return `<div class="suggest" style="margin-top:14px"><div class="grow"><b>Track your net worth</b><div class="muted">Add your assets and debts to see your net worth, month-by-month progress and goals.</div></div><button class="primary" data-go="nw">Get started</button></div>`;
+  const t = nwTotals(), pv = prevSnap(), goals = NW().goals.slice(0, 3);
+  return `<h3>Net worth</h3><div class="stats">
+    <div class="stat link" data-go="nw"><div class="n">${money(t.A)}</div><div class="l">Total assets</div><div class="dl">${deltaHtml(t.A, pv && pv.assets)}</div></div>
+    <div class="stat link" data-go="nw"><div class="n">${money(t.D)}</div><div class="l">Total debt</div><div class="dl">${deltaHtml(t.D, pv && pv.debts, false)}</div></div>
+    <div class="stat link nw-main" data-go="nw"><div class="n">${money(t.N)}</div><div class="l">Net worth</div><div class="dl">${deltaHtml(t.N, pv && pv.assets - pv.debts)}</div></div></div>
+    ${goals.length ? `<div class="list" style="margin-top:12px" data-go="nw">${goals.map(goalRow).join('')}</div>` : ''}`;
+}
+function bindNwHome() {}
+function bindFinTabs(root) { root.querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => go({ name: 'cat', cat: 'Finance', tab: b.dataset.tab }))); }
+function trendSvg(h) {
+  if (h.length < 2) return '<div class="muted" style="padding:10px 0">Your trend chart appears after your second month. A snapshot is saved automatically each time you update your numbers.</div>';
+  const pts = h.map((x) => x.assets - x.debts), W = 900, H = 150, P = 26, min = Math.min(...pts), max = Math.max(...pts), span = max - min || 1;
+  const xy = (i) => [P + (i * (W - 2 * P)) / (pts.length - 1), H - P - ((pts[i] - min) / span) * (H - 2 * P)];
+  return `<svg class="trend" viewBox="0 0 ${W} ${H}" role="img" aria-label="Net worth by month"><polyline fill="none" stroke="var(--accent)" stroke-width="3" points="${pts.map((_, i) => xy(i).join(',')).join(' ')}"/>${pts.map((_, i) => `<circle cx="${xy(i)[0]}" cy="${xy(i)[1]}" r="4" fill="var(--accent)"><title>${monthLabel(h[i].month)}: ${money(pts[i])}</title></circle>`).join('')}
+    <text x="${P}" y="${H - 6}" class="tl">${monthLabel(h[0].month)}</text><text x="${W - P}" y="${H - 6}" text-anchor="end" class="tl">${monthLabel(h[h.length - 1].month)}</text>
+    <text x="${W / 2}" y="12" text-anchor="middle" class="tl">Range ${money(min)} to ${money(max)}</text></svg>`;
+}
+const groupBy = (list, key) => { const m = new Map(); for (const x of list) { const c = x[key] || 'Uncategorized'; if (!m.has(c)) m.set(c, []); m.get(c).push(x); } return [...m]; };
+
+function renderNetWorth(v) {
+  const n = NW(), t = nwTotals(), pv = prevSnap();
+  const assetsHtml = n.assets.length ? `<div class="list tbl-wrap"><table class="nwt"><thead><tr><th>Investment</th><th class="num">Shares</th><th class="num">Price</th><th class="num">Total</th><th>Location</th></tr></thead><tbody>${groupBy(n.assets, 'category').map(([c, l], gi, all) => {
+      const sub = l.reduce((s, a) => s + assetTotal(a), 0), plain = all.length === 1 && c === 'Uncategorized';
+      return (plain ? '' : `<tr class="catrow"><td colspan="3">${esc(c)} <span class="muted">· ${t.A ? Math.round((sub / t.A) * 100) : 0}%</span></td><td class="num">${money(sub)}</td><td></td></tr>`) + l.map((a) => `<tr class="clk" data-a="${a.id}"><td>${esc(a.name)}${a.personId && person(a.personId) ? ` <span class="muted">· ${esc(person(a.personId).name)}</span>` : ''}</td><td class="num">${fmtNum(a.shares)}</td><td class="num">${money(a.price, 2)}</td><td class="num">${money(assetTotal(a), 2)}</td><td>${esc(a.location)}</td></tr>`).join('');
+    }).join('')}</tbody><tfoot><tr><td colspan="3">Total assets</td><td class="num">${money(t.A, 2)}</td><td></td></tr></tfoot></table></div>` : '<div class="list"><div class="empty">No assets yet. Add each investment, account or valuable, or paste them in from a spreadsheet.</div></div>';
+  const debtsHtml = n.debts.length ? `<div class="list tbl-wrap"><table class="nwt"><thead><tr><th>Debt</th><th class="num">Owed</th><th class="num">Monthly</th><th class="num">Rate</th><th>Pay off</th></tr></thead><tbody>${groupBy(n.debts, 'category').map(([c, l], gi, all) =>
+      (all.length === 1 && c === 'Uncategorized' ? '' : `<tr class="catrow"><td>${esc(c)}</td><td class="num">${money(l.reduce((s, d) => s + d.owed, 0))}</td><td class="num">${money(l.reduce((s, d) => s + d.monthly, 0))}</td><td></td><td></td></tr>`) + l.map((d) => `<tr class="clk" data-d="${d.id}"><td>${esc(d.name)}</td><td class="num">${money(d.owed, 2)}</td><td class="num">${money(d.monthly, 2)}</td><td class="num">${d.rate ? d.rate + '%' : '—'}</td><td>${esc(d.payoff)}</td></tr>`).join('')).join('')}</tbody>
+    <tfoot><tr><td>Total debt</td><td class="num">${money(t.D, 2)}</td><td class="num">${money(n.debts.reduce((s, d) => s + d.monthly, 0), 2)}</td><td></td><td></td></tr></tfoot></table></div>` : '<div class="list"><div class="empty">No debts recorded. Add loans, cards and the mortgage to see your true net worth.</div></div>';
+  const hist = n.history.slice().reverse();
+  const histHtml = hist.length ? `<div class="list tbl-wrap"><table class="nwt"><thead><tr><th>Month</th><th class="num">Assets</th><th class="num">Debt</th><th class="num">Net worth</th><th class="num">Change</th></tr></thead><tbody>${hist.map((h, i) => { const net = h.assets - h.debts, p = hist[i + 1], d = p ? net - (p.assets - p.debts) : null;
+      return `<tr class="clk" data-h="${h.month}"><td>${monthLabel(h.month)}${h.month === monthNow() ? ' <span class="muted">(this month)</span>' : ''}</td><td class="num">${money(h.assets)}</td><td class="num">${money(h.debts)}</td><td class="num"><b>${money(net)}</b></td><td class="num">${d == null ? '—' : `<span class="${d >= 0 ? 'up' : 'down'}">${d >= 0 ? '▲' : '▼'} ${money(Math.abs(d))}</span>`}</td></tr>`; }).join('')}</tbody></table></div>` : '';
+  v.innerHTML = `<div class="head"><div><h2>💰 Finance</h2><div class="muted">Your net worth, month by month. Stored encrypted like everything else.</div></div><div class="hbtns">${finTabs('nw')}<button id="exp">⬇ Export CSV</button></div></div>
+    <div class="stats">
+      <div class="stat nw-main"><div class="n">${money(t.N)}</div><div class="l">Net worth</div><div class="dl">${deltaHtml(t.N, pv && pv.assets - pv.debts)}</div></div>
+      <div class="stat"><div class="n">${money(t.A)}</div><div class="l">Total assets</div><div class="dl">${deltaHtml(t.A, pv && pv.assets)}</div></div>
+      <div class="stat"><div class="n">${money(t.D)}</div><div class="l">Total debt</div><div class="dl">${deltaHtml(t.D, pv && pv.debts, false)}</div></div>
+    </div>
+    <div class="list" style="padding:12px 16px;margin-top:14px">${trendSvg(n.history)}</div>
+    <div class="sec"><h3>Goals</h3><div class="hbtns"><button class="small" id="ag">+ Add goal</button></div></div>
+    <div class="list">${n.goals.length ? n.goals.map(goalRow).join('') : '<div class="empty">Set a goal, like “Net worth $3,000,000” or “Pay off credit cards”, and watch your progress here and on the home page.</div>'}</div>
+    <div class="sec"><h3>Assets</h3><div class="hbtns"><button class="small primary" id="aa">+ Add asset</button><button class="small" id="ua">Update prices</button><button class="small" id="pa">Paste from spreadsheet</button></div></div>${assetsHtml}
+    <div class="sec"><h3>Debts</h3><div class="hbtns"><button class="small primary" id="ad">+ Add debt</button><button class="small" id="pd">Paste from spreadsheet</button></div></div>${debtsHtml}
+    <div class="sec"><h3>Month by month</h3><div class="hbtns"><button class="small" id="ah">+ Add a past month</button></div></div>${histHtml || '<div class="list"><div class="empty">Your first monthly snapshot is saved automatically once you add assets or debts.</div></div>'}
+    <p class="muted" style="font-size:.85em">A snapshot of this month is saved each time you change a value, so next month you'll see how you've moved. Update prices and balances once a month to keep your history accurate.</p>`;
+  bindFinTabs(v);
+  $('#exp').onclick = exportNwCsv;
+  $('#aa').onclick = () => assetDialog(); $('#ua').onclick = bulkUpdateDialog; $('#pa').onclick = () => pasteDialog('assets');
+  $('#ad').onclick = () => debtDialog(); $('#pd').onclick = () => pasteDialog('debts');
+  $('#ag').onclick = () => goalDialog(); $('#ah').onclick = () => snapshotDialog();
+  v.querySelectorAll('[data-a]').forEach((e) => (e.onclick = () => assetDialog(n.assets.find((x) => x.id === e.dataset.a))));
+  v.querySelectorAll('[data-d]').forEach((e) => (e.onclick = () => debtDialog(n.debts.find((x) => x.id === e.dataset.d))));
+  v.querySelectorAll('[data-goal]').forEach((e) => (e.onclick = () => goalDialog(n.goals.find((x) => x.id === e.dataset.goal))));
+  v.querySelectorAll('[data-h]').forEach((e) => (e.onclick = () => snapshotDialog(n.history.find((x) => x.month === e.dataset.h))));
+}
+
+const ASSET_CATS = ['Bitcoin', 'Gold', 'Silver', 'Real Estate', 'Cash / Stocks', 'Retirement', 'Vehicles', 'Business', 'Other'];
+const DEBT_CATS = ['Credit card', 'Loan', 'Vehicle loan', 'Student loan', 'Mortgage', 'Buy now pay later', 'Other'];
+const peopleSel = (sel) => opts([['', 'Whole family'], ...db.people.map((p) => [p.id, p.name])], sel);
+function assetDialog(a) {
+  const x = a ? { ...a } : { id: uid(), name: '', category: '', location: '', shares: 1, price: 0, notes: '', personId: '' };
+  dialog(`<h2>${a ? 'Edit' : 'Add'} asset</h2><form id="f"><label>Investment / asset<input id="n" value="${esc(x.name)}" required maxlength="80" placeholder="Bitcoin in Trezor, Home, Megan's 403(b)…"></label>
+    <div class="grid2"><label>Category<input id="c" list="acats" value="${esc(x.category)}" maxlength="40" placeholder="Bitcoin, Real Estate…"></label><label>Location<input id="l" value="${esc(x.location)}" maxlength="80" placeholder="Safe, Kraken, Roots…"></label></div>
+    <datalist id="acats">${[...new Set([...ASSET_CATS, ...NW().assets.map((q) => q.category).filter(Boolean)])].map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
+    <div class="grid3"><label>Shares / quantity<input id="s" type="number" step="any" min="0" value="${x.shares}"></label><label>Price per share<input id="p" type="number" step="any" min="0" value="${x.price}"></label><label>Total value<input id="t" type="number" step="any" min="0" value="${r2(assetTotal(x))}"></label></div>
+    <div class="muted" style="font-size:.85em;margin:-4px 0 10px">For a single item like a house, leave shares at 1 and enter its value. Typing a total updates the price.</div>
+    <label>Belongs to<select id="who">${peopleSel(x.personId)}</select></label><label>Notes<textarea id="no" rows="2" maxlength="300">${esc(x.notes)}</textarea></label>
+    <div class="btns">${a ? '<button type="button" class="danger left" id="del">Delete</button>' : ''}<button type="button" class="ghost" data-close>Cancel</button><button class="primary">Save</button></div></form>`, (d) => {
+    const S = $('#s', d), P = $('#p', d), T = $('#t', d);
+    S.oninput = P.oninput = () => (T.value = r2((+S.value || 0) * (+P.value || 0)));
+    T.oninput = () => { const sh = +S.value || 1; if (!+S.value) S.value = 1; P.value = (+T.value || 0) / sh; };
+    if ($('#del', d)) $('#del', d).onclick = async () => { if (!confirm('Delete this asset?')) return; NW().assets = NW().assets.filter((q) => q.id !== x.id); await saveNw(); d.close(); render(); };
+    $('#f', d).onsubmit = async (e) => {
+      e.preventDefault();
+      Object.assign(x, { name: $('#n', d).value.trim(), category: $('#c', d).value.trim(), location: $('#l', d).value.trim(), shares: +S.value || 0, price: +P.value || 0, personId: $('#who', d).value, notes: $('#no', d).value });
+      if (a) NW().assets[NW().assets.findIndex((q) => q.id === x.id)] = x; else NW().assets.push(x);
+      try { await saveNw(); d.close(); render(); } catch (err) { toast(err.message); }
+    };
+  });
+}
+function debtDialog(dbt) {
+  const x = dbt ? { ...dbt } : { id: uid(), name: '', category: '', owed: 0, monthly: 0, rate: 0, payoff: '', notes: '' };
+  dialog(`<h2>${dbt ? 'Edit' : 'Add'} debt</h2><form id="f"><label>Debt<input id="n" value="${esc(x.name)}" required maxlength="80" placeholder="Mortgage, Visa, Tesla loan…"></label>
+    <label>Type<input id="c" list="dcats" value="${esc(x.category)}" maxlength="40"></label><datalist id="dcats">${[...new Set([...DEBT_CATS, ...NW().debts.map((q) => q.category).filter(Boolean)])].map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
+    <div class="grid3"><label>Amount owed<input id="o" type="number" step="any" min="0" value="${x.owed}"></label><label>Monthly payment<input id="m" type="number" step="any" min="0" value="${x.monthly}"></label><label>Interest rate %<input id="r" type="number" step="any" min="0" value="${x.rate}"></label></div>
+    <label>Pay-off date or year<input id="po" value="${esc(x.payoff)}" maxlength="30" placeholder="August, 2030…"></label><label>Notes<textarea id="no" rows="2" maxlength="300">${esc(x.notes)}</textarea></label>
+    <div class="btns">${dbt ? '<button type="button" class="danger left" id="del">Delete</button>' : ''}<button type="button" class="ghost" data-close>Cancel</button><button class="primary">Save</button></div></form>`, (d) => {
+    if ($('#del', d)) $('#del', d).onclick = async () => { if (!confirm('Delete this debt?')) return; NW().debts = NW().debts.filter((q) => q.id !== x.id); await saveNw(); d.close(); render(); };
+    $('#f', d).onsubmit = async (e) => {
+      e.preventDefault();
+      Object.assign(x, { name: $('#n', d).value.trim(), category: $('#c', d).value.trim(), owed: +$('#o', d).value || 0, monthly: +$('#m', d).value || 0, rate: +$('#r', d).value || 0, payoff: $('#po', d).value.trim(), notes: $('#no', d).value });
+      if (dbt) NW().debts[NW().debts.findIndex((q) => q.id === x.id)] = x; else NW().debts.push(x);
+      try { await saveNw(); d.close(); render(); } catch (err) { toast(err.message); }
+    };
+  });
+}
+function goalDialog(g) {
+  const x = g ? { ...g } : { id: uid(), name: '', metric: 'net', target: 0, date: '' };
+  dialog(`<h2>${g ? 'Edit' : 'Add'} goal</h2><form id="f"><label>Goal name<input id="n" value="${esc(x.name)}" required maxlength="80" placeholder="Net worth $3 million, Pay down cards…"></label>
+    <div class="grid2"><label>Measure<select id="m">${opts(Object.entries(METRIC), x.metric)}</select></label><label>Target amount<input id="t" type="number" step="any" min="0" value="${x.target}" required></label></div>
+    <label>Target date (optional)<input id="dt" type="date" value="${esc(x.date)}"></label>
+    <div class="muted" style="font-size:.85em">For “Total debt”, the goal is to get under the target. Progress is measured from where you are today.</div>
+    <div class="btns">${g ? '<button type="button" class="danger left" id="del">Delete</button>' : ''}<button type="button" class="ghost" data-close>Cancel</button><button class="primary">Save</button></div></form>`, (d) => {
+    if ($('#del', d)) $('#del', d).onclick = async () => { if (!confirm('Delete this goal?')) return; NW().goals = NW().goals.filter((q) => q.id !== x.id); await save(); d.close(); render(); };
+    $('#f', d).onsubmit = async (e) => {
+      e.preventDefault();
+      const metric = $('#m', d).value, t = nwTotals(), cur = metric === 'assets' ? t.A : metric === 'debts' ? t.D : t.N;
+      Object.assign(x, { name: $('#n', d).value.trim(), metric, target: +$('#t', d).value || 0, date: $('#dt', d).value });
+      if (!g || g.metric !== metric) x.start = cur;
+      if (g) NW().goals[NW().goals.findIndex((q) => q.id === x.id)] = x; else NW().goals.push(x);
+      try { await save(); d.close(); render(); } catch (err) { toast(err.message); }
+    };
+  });
+}
+function snapshotDialog(h) {
+  const x = h ? { ...h } : { month: monthNow(), assets: 0, debts: 0 };
+  dialog(`<h2>${h ? 'Edit month' : 'Add a past month'}</h2><form id="f"><label>Month<input id="mo" type="month" value="${x.month}" required ${h ? 'disabled' : ''}></label>
+    <div class="grid2"><label>Total assets<input id="a" type="number" step="any" min="0" value="${x.assets}"></label><label>Total debt<input id="de" type="number" step="any" min="0" value="${x.debts}"></label></div>
+    <div class="muted" style="font-size:.85em">Use this to add months from before you started, so your history and trend are complete.${h && h.month === monthNow() ? ' This month updates automatically when you change your numbers.' : ''}</div>
+    <div class="err muted" id="e"></div><div class="btns">${h ? '<button type="button" class="danger left" id="del">Delete</button>' : ''}<button type="button" class="ghost" data-close>Cancel</button><button class="primary">Save</button></div></form>`, (d) => {
+    if ($('#del', d)) $('#del', d).onclick = async () => { if (!confirm('Delete this month from your history?')) return; NW().history = NW().history.filter((q) => q.month !== x.month); await save(); d.close(); render(); };
+    $('#f', d).onsubmit = async (e) => {
+      e.preventDefault();
+      const month = h ? h.month : $('#mo', d).value, rec = { month, assets: +$('#a', d).value || 0, debts: +$('#de', d).value || 0 };
+      if (!/^\d{4}-\d{2}$/.test(month)) return ($('#e', d).textContent = 'Choose a month.');
+      const i = NW().history.findIndex((q) => q.month === month);
+      if (i >= 0) NW().history[i] = rec; else NW().history.push(rec);
+      NW().history.sort((a, b) => a.month.localeCompare(b.month));
+      try { await save(); d.close(); render(); } catch (err) { $('#e', d).textContent = err.message; }
+    };
+  });
+}
+function bulkUpdateDialog() {
+  const n = NW();
+  dialog(`<h2>Update values</h2><p class="muted">Change the numbers that moved this month, then save once.</p><form id="f">
+    ${n.assets.length ? `<h3 style="margin-top:6px">Assets</h3><div class="tbl-wrap"><table class="nwt upd"><thead><tr><th>Asset</th><th class="num">Shares</th><th class="num">Price</th><th class="num">Total</th></tr></thead><tbody>${n.assets.map((a) => `<tr data-id="${a.id}"><td>${esc(a.name)}</td><td><input class="us" type="number" step="any" value="${a.shares}"></td><td><input class="up" type="number" step="any" value="${a.price}"></td><td class="num ut">${money(assetTotal(a), 2)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+    ${n.debts.length ? `<h3>Debts</h3><div class="tbl-wrap"><table class="nwt upd"><thead><tr><th>Debt</th><th class="num">Owed</th><th class="num">Monthly</th></tr></thead><tbody>${n.debts.map((q) => `<tr data-id="${q.id}"><td>${esc(q.name)}</td><td><input class="uo" type="number" step="any" value="${q.owed}"></td><td><input class="um" type="number" step="any" value="${q.monthly}"></td></tr>`).join('')}</tbody></table></div>` : ''}
+    <div class="btns"><button type="button" class="ghost" data-close>Cancel</button><button class="primary">Save update</button></div></form>`, (d) => {
+    d.querySelectorAll('tr[data-id] .us, tr[data-id] .up').forEach((i) => (i.oninput = () => { const tr = i.closest('tr'); tr.querySelector('.ut').textContent = money((+tr.querySelector('.us').value || 0) * (+tr.querySelector('.up').value || 0), 2); }));
+    $('#f', d).onsubmit = async (e) => {
+      e.preventDefault();
+      d.querySelectorAll('tr[data-id]').forEach((tr) => {
+        const a = n.assets.find((q) => q.id === tr.dataset.id), q = n.debts.find((z) => z.id === tr.dataset.id);
+        if (a && tr.querySelector('.us')) { a.shares = +tr.querySelector('.us').value || 0; a.price = +tr.querySelector('.up').value || 0; }
+        else if (q && tr.querySelector('.uo')) { q.owed = +tr.querySelector('.uo').value || 0; q.monthly = +tr.querySelector('.um').value || 0; }
+      });
+      try { await saveNw(); d.close(); render(); toast('Updated'); } catch (err) { toast(err.message); }
+    };
+  }, true);
+}
+function pasteDialog(kind) {
+  const A = kind === 'assets';
+  const hint = A ? 'Investment, Shares, Price, Total, Category, Location' : 'Debt, Amount owed, Monthly payment, Interest rate, Pay-off date';
+  dialog(`<h2>Paste from a spreadsheet</h2><p class="muted">In Google Sheets or Excel, select your rows (with or without the header row), copy, and paste below. Columns in this order: <b>${hint}</b>. If your first row has headers, they are matched by name instead. Blank categories or locations carry down from the row above, like merged cells.</p>
+    <form id="f"><textarea id="ta" rows="9" placeholder="Paste here…" style="font-family:ui-monospace,monospace;font-size:.85em"></textarea><div id="sum" class="muted" style="margin:6px 0"></div>
+    <label class="inl"><input type="checkbox" id="rp" style="width:auto"> Replace my current ${kind} instead of adding to them</label><div class="err muted" id="e"></div>
+    <div class="btns"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" id="go" disabled>Import</button></div></form>`, (d) => {
+    let out = [];
+    $('#ta', d).oninput = () => {
+      const rows = csvParse($('#ta', d).value); out = [];
+      if (rows.length) {
+        const norm2 = (x) => x.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const defs = A ? { name: ['investment', 'name', 'equity', 'asset', 'item'], shares: ['shares', 'quantity', 'qty', 'units'], price: ['price', 'priceperunit'], total: ['total', 'amount', 'value'], category: ['category', 'type'], location: ['location', 'where'], notes: ['notes', 'note'] }
+          : { name: ['debt', 'name', 'account', 'loan'], owed: ['amountowed', 'owed', 'balance', 'amount'], monthly: ['monthlypayment', 'payment', 'monthly'], rate: ['interestrate', 'rate', 'apr', 'interest'], payoff: ['payoffdate', 'payoff', 'payoffby'], category: ['category', 'type'] };
+        const first = rows[0].map(norm2), hits = Object.values(defs).filter((al) => first.some((h) => al.includes(h))).length;
+        let idx = {}, body = rows;
+        if (hits >= 2) { body = rows.slice(1); const used = new Set(); for (const [f, al] of Object.entries(defs)) { const i = first.findIndex((h, k) => !used.has(k) && al.includes(h)); if (i >= 0) { idx[f] = i; used.add(i); } } }
+        else idx = A ? { name: 0, shares: 1, price: 2, total: 3, category: 4, location: 5 } : { name: 0, owed: 1, monthly: 2, rate: 3, payoff: 4 };
+        let lastCat = '', lastLoc = '';
+        for (const r of body) {
+          const g = (f) => (idx[f] === undefined ? '' : String(r[idx[f]] ?? '').trim());
+          const name = g('name'); if (!name || /^totals?$/i.test(name) || /^(total|net worth|debt|liquid)/i.test(name) && !pnum(g(A ? 'total' : 'owed'))) continue;
+          if (A) {
+            if (g('category')) lastCat = g('category'); if (g('location')) lastLoc = g('location');
+            let shares = pnum(g('shares')), price = pnum(g('price')); const total = pnum(g('total'));
+            if (!price && total) { if (!shares) shares = 1; price = total / shares; } else if (!shares && price) shares = 1;
+            if (!shares && !price) continue;
+            out.push({ id: uid(), name: name.slice(0, 80), category: lastCat, location: lastLoc, shares, price, notes: g('notes'), personId: '' });
+          } else {
+            const owed = pnum(g('owed')); if (!owed && !pnum(g('monthly'))) continue;
+            out.push({ id: uid(), name: name.slice(0, 80), category: g('category'), owed, monthly: pnum(g('monthly')), rate: pnum(g('rate')), payoff: g('payoff'), notes: '' });
+          }
+        }
+      }
+      $('#sum', d).textContent = out.length ? `${out.length} ${kind === 'assets' ? 'asset' : 'debt'}${out.length === 1 ? '' : 's'} found: ${out.slice(0, 4).map((x) => x.name).join(', ')}${out.length > 4 ? ', …' : ''}` : ($('#ta', d).value.trim() ? 'No usable rows found yet.' : '');
+      $('#go', d).disabled = !out.length;
+    };
+    $('#f', d).onsubmit = async (e) => {
+      e.preventDefault(); if (!out.length) return;
+      NW()[kind] = $('#rp', d).checked ? out : [...NW()[kind], ...out];
+      try { await saveNw(); d.close(); render(); toast(`Imported ${out.length}`); } catch (err) { $('#e', d).textContent = err.message; }
+    };
+  });
+}
+function exportNwCsv() {
+  const n = NW(), L = [];
+  L.push('Assets'); L.push(['Investment', 'Shares', 'Price', 'Total', 'Category', 'Location', 'Notes'].join(','));
+  for (const a of n.assets) L.push([a.name, a.shares, a.price, r2(assetTotal(a)), a.category, a.location, a.notes].map(csvCell).join(','));
+  L.push(''); L.push('Debts'); L.push(['Debt', 'Amount owed', 'Monthly payment', 'Interest rate', 'Pay-off', 'Type'].join(','));
+  for (const d of n.debts) L.push([d.name, d.owed, d.monthly, d.rate, d.payoff, d.category].map(csvCell).join(','));
+  L.push(''); L.push('Month by month'); L.push(['Month', 'Assets', 'Debt', 'Net worth'].join(','));
+  for (const h of n.history) L.push([h.month, h.assets, h.debts, r2(h.assets - h.debts)].join(','));
+  downloadText('family-vault-net-worth.csv', L.join('\n') + '\n');
+  toast('Exported. That file is not encrypted, so keep it safe.');
 }
 
 function changePassDialog() {
