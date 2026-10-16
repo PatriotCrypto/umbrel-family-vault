@@ -7,7 +7,7 @@ services:
       APP_PORT: 3000
 
   web:
-    image: ghcr.io/patriotcrypto/family-vault:0.5.0@sha256:596604732c7ff2b1a0fa2f04c479fd4f98eed6751ba7f2077997a6f3bfffcf83
+    image: ghcr.io/patriotcrypto/family-vault:0.5.1@sha256:0d9c0fe300669f7b2aa1b369ab7d5cbefd2a91e1779b917c9f61f024bce0e1e0
     restart: on-failure
     stop_grace_period: 1m
     read_only: true

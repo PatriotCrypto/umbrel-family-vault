@@ -330,3 +330,5 @@ svg.trend .tl{font-size:11px;fill:var(--mute)}
 [data-theme="retro"] #view .btc-card{color:#fff}
 
 svg.trend{max-height:190px}
+/* retro: the highlighted net worth tile is navy, so its text must be white */
+[data-theme="retro"] #view .stat.nw-main,[data-theme="retro"] #view .stat.nw-main .l,[data-theme="retro"] #view .stat.nw-main .muted,[data-theme="retro"] #view .stat.nw-main .n,[data-theme="retro"] #view .stat.nw-main .dl,[data-theme="retro"] #view .stat.nw-main .up,[data-theme="retro"] #view .stat.nw-main .down{color:#fff}
