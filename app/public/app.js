@@ -2,17 +2,18 @@
 const CATS = ['Family','Finance','Property','Passwords','Insurance','Tax','Legal','Business','Employment','Family Resources'];
 const CAT_ICON = { Family:'👪', Finance:'💰', Property:'🏠', Passwords:'🔑', Insurance:'🛡️', Tax:'🧾', Legal:'⚖️', Business:'💼', Employment:'👔', 'Family Resources':'📚' };
 const HINTS = {
-  Finance:['bank','statement','invoice','loan','mortgage','401k','ira','investment','credit'],
-  Property:['deed','title','lease','rent','hoa','property','vehicle','registration','home'],
-  Insurance:['insurance','policy','claim','coverage','premium'],
-  Tax:['tax','1040','w-2','w2','1099','irs','return'],
-  Legal:['will','trust','power of attorney','poa','contract','court','agreement','divorce'],
-  Business:['llc','business','incorporation','ein','corp'],
-  Employment:['resume','offer','payroll','paystub','employment','benefits'],
-  Family:['birth','passport','license','social','marriage','certificate','vaccin','medical','id'],
+  Family:['birth certificate','birth','passport','driver','drivers','license','licence','social security','ssn','marriage','certificate','vaccination','vaccine','immunization','medical','school','report card','faa','handgun','concealed','carry','state id','id card','visa','citizenship','military','dd214','dd 214','records'],
+  Finance:['bank','statement','invoice','receipt','loan','mortgage','401k','ira','brokerage','investment','credit','savings','checking','crypto','wallet','kraken','robinhood','coinbase','balance','deposit'],
+  Property:['deed','title','lease','rent','hoa','property','vehicle','registration','car','truck','trailer','house','home','appraisal','survey','boat','closing'],
+  Insurance:['insurance','policy','claim','coverage','premium','life','auto','homeowners','umbrella','liability','dental','health'],
+  Tax:['tax','1040','w2','w 2','1099','irs','return','k 1','taxes'],
+  Legal:['will','trust','power of attorney','poa','contract','court','agreement','divorce','estate','directive','lawsuit','notary','living will'],
+  Business:['llc','business','incorporation','ein','corp','articles','operating agreement','s corp'],
+  Employment:['resume','offer letter','payroll','paystub','pay stub','employment','benefits','w4','w 4','i9','i 9','job'],
 };
 const BTC_KINDS = ['Hardware wallet','Software wallet','Exchange account','Seed phrase backup','Passphrase / PIN hint','Inheritance instructions','Other'];
 const THEMES = [
+  { id:'classic', name:'Classic', sw:['#ffffff','#f3f4f6','#2563eb','#111827'] },
   { id:'light', name:'Bright', sw:['#f5f1ff','#7b3ff2','#e83e8c','#1b1450'] },
   { id:'dark', name:'Midnight', sw:['#12102a','#9b6bff','#ff5fa8','#ece8ff'] },
   { id:'retro', name:'Retro 95', sw:['#008080','#c0c0c0','#000080','#ffffff'] },
@@ -27,15 +28,15 @@ const fmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.ma
 const fmtDate = (d) => (d ? new Date(d + 'T00:00:00').toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '');
 const fmtBtc = (sats) => (sats / 1e8).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 });
 const fmtUsd = (n) => n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-let db = null, view = { name: 'home' }, query = '', btcSummary = null;
-let toastT;
-function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2800); }
+let db = null, S = {}, view = { name: 'home' }, query = '', btcSummary = null, toastT;
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 3000); }
 function setTheme(id) { document.documentElement.dataset.theme = id; try { localStorage.setItem('fv-theme', id); } catch {} }
 const curTheme = () => document.documentElement.dataset.theme;
 
 async function api(url, opts = {}) {
-  const o = { method: opts.method || 'GET', headers: {} };
+  const o = { method: opts.method || 'GET', headers: { 'X-FV': '1' } };
   if (opts.json !== undefined) { o.headers['Content-Type'] = 'application/json'; o.body = JSON.stringify(opts.json); }
   const r = await fetch(url, o);
   if (r.status === 423) { await boot(); throw new Error('The vault is locked.'); }
@@ -45,28 +46,70 @@ async function api(url, opts = {}) {
 }
 async function save() { const r = await api('/api/db', { method: 'PUT', json: db }); db.rev = r.rev; }
 
+// ---------- passphrase strength ----------
+function strength(p) {
+  if (!p) return { bits: 0, label: '', pct: 0, ok: false };
+  let bits;
+  const wordy = /^[A-Za-z' ]+$/.test(p) && p.includes(' ');
+  if (wordy) bits = p.trim().split(/\s+/).length * 11.5;          // words from a common word list
+  else {
+    let pool = 0;
+    if (/[a-z]/.test(p)) pool += 26; if (/[A-Z]/.test(p)) pool += 26; if (/\d/.test(p)) pool += 10; if (/[^A-Za-z0-9 ]/.test(p)) pool += 32; if (/ /.test(p)) pool += 1;
+    bits = p.length * Math.log2(pool || 1) * Math.min(1, new Set(p).size / (p.length * 0.6));
+    if (/(.)\1{2,}/.test(p)) bits *= 0.8;
+  }
+  if (/^(password|123456|qwerty|letmein|iloveyou)/i.test(p)) bits = Math.min(bits, 15);
+  bits = Math.round(bits);
+  const label = bits < 40 ? 'Too weak' : bits < 60 ? 'Okay' : bits < 80 ? 'Strong' : 'Excellent';
+  return { bits, label, pct: Math.min(100, Math.round(bits)), ok: p.length >= 12 && bits >= 40 };
+}
+function meterHtml() { return `<div class="meter"><i></i></div><div class="meter-l muted"></div>`; }
+function meterBind(root, input) {
+  const upd = () => { const s = strength(input.value); const i = $('.meter i', root); i.style.width = s.pct + '%'; i.className = s.bits < 40 ? 'bad' : s.bits < 60 ? 'mid' : 'good'; $('.meter-l', root).textContent = input.value ? `${s.label}${input.value.length < 12 ? ' · at least 12 characters' : ''}` : 'Tip: 5 or more random words make a strong, memorable passphrase.'; };
+  input.addEventListener('input', upd); upd();
+}
+
 // ---------- gate ----------
 async function boot() {
-  const st = await api('/api/status');
-  if (st.unlocked) {
+  S = await api('/api/status');
+  if (S.unlocked) {
     db = await api('/api/db');
     $('#gate').classList.add('hidden'); $('#app').classList.remove('hidden');
     render();
+    if (S.upgrade && S.upgrade.running) upgradeProgress();
     return;
   }
   $('#app').classList.add('hidden');
   const g = $('#gate'); g.classList.remove('hidden');
-  if (!st.initialized) {
+  if (!S.initialized) {
     g.innerHTML = `<form class="box" id="gf"><img src="icon.svg" alt=""><h1>Create your vault</h1>
       <p class="muted">Choose a passphrase. Everything you store is encrypted with it, and it is never saved anywhere.
       <b>If you forget it, nobody can recover your documents</b>, so write it down and keep it somewhere safe.</p>
-      <label>Passphrase (8+ characters)<input id="p1" type="password" autocomplete="new-password" required></label>
+      <label>Passphrase (12+ characters)<input id="p1" type="password" autocomplete="new-password" required></label>
+      <div id="m1">${meterHtml()}</div>
       <label>Type it again<input id="p2" type="password" autocomplete="new-password" required></label>
-      <div class="err" id="ge"></div><button class="primary" style="width:100%">Create vault</button></form>`;
+      <div class="err" id="ge"></div><button class="primary" style="width:100%">Create vault</button>
+      <p class="muted" style="text-align:center;margin-top:14px">Already have a backup? <a href="#" id="rs">Restore it</a></p></form>`;
+    meterBind($('#m1'), $('#p1'));
     $('#gf').onsubmit = async (e) => {
       e.preventDefault();
       if ($('#p1').value !== $('#p2').value) return ($('#ge').textContent = 'The two passphrases do not match.');
+      if (!strength($('#p1').value).ok) return ($('#ge').textContent = 'Please choose a stronger passphrase (12+ characters, hard to guess).');
       try { await api('/api/setup', { method: 'POST', json: { passphrase: $('#p1').value } }); boot(); } catch (x) { $('#ge').textContent = x.message; }
+    };
+    $('#rs').onclick = (e) => {
+      e.preventDefault();
+      const i = document.createElement('input'); i.type = 'file'; i.accept = '.zip';
+      i.onchange = async () => {
+        if (!i.files[0]) return;
+        $('#ge').textContent = 'Restoring… this can take a while for large backups.';
+        try {
+          const r = await fetch('/api/restore', { method: 'POST', body: i.files[0], headers: { 'X-FV': '1', 'Content-Type': 'application/octet-stream' } });
+          const d = await r.json(); if (!r.ok) throw new Error(d.error);
+          toast('Backup restored. Enter your passphrase.'); boot();
+        } catch (x) { $('#ge').textContent = x.message; }
+      };
+      i.click();
     };
   } else {
     g.innerHTML = `<form class="box" id="gf"><img src="icon.svg" alt=""><h1>Family Vault</h1>
@@ -75,6 +118,7 @@ async function boot() {
       <div class="err" id="ge"></div><button class="primary" style="width:100%">Unlock</button></form>`;
     $('#gf').onsubmit = async (e) => {
       e.preventDefault();
+      $('#ge').textContent = 'Unlocking…';
       try { await api('/api/unlock', { method: 'POST', json: { passphrase: $('#p1').value } }); boot(); } catch (x) { $('#ge').textContent = x.message; }
     };
   }
@@ -85,18 +129,13 @@ async function boot() {
 const person = (id) => db.people.find((p) => p.id === id);
 const fileOf = (id) => db.files.find((f) => f.id === id);
 const inbox = () => db.items.filter((i) => !i.reviewed);
-const docFiles = () => db.files.filter((f) => !f.avatar);
-function suggest(name) {
-  const n = name.toLowerCase();
-  for (const [c, words] of Object.entries(HINTS)) if (words.some((w) => n.includes(w))) return c;
-  return 'Family Resources';
-}
 function upcoming() {
   const out = [];
   for (const i of db.items) if (i.expires && i.reviewed !== false) out.push({ kind: 'item', id: i.id, title: i.title + ' expires', date: i.expires });
   for (const r of db.reminders) if (!r.done) out.push({ kind: 'rem', id: r.id, title: r.title, date: r.date });
   return out.sort((a, b) => a.date.localeCompare(b.date));
 }
+const famName = () => ((db.settings && db.settings.familyName) || '').trim() || 'Welcome home';
 const dueBadge = (d) => {
   const n = daysUntil(d);
   if (n < 0) return `<span class="pill bad">${-n}d overdue</span>`;
@@ -104,6 +143,102 @@ const dueBadge = (d) => {
   return `<span class="pill">${fmtDate(d)}</span>`;
 };
 const avatar = (p, cls = '') => `<div class="avatar ${cls}">${p.photo && fileOf(p.photo) ? `<img src="/api/files/${esc(p.photo)}" alt="">` : esc((p.name || '?')[0].toUpperCase())}</div>`;
+
+// ---------- best guesses from a file name ----------
+const norm = (s) => ' ' + s.toLowerCase().replace(/\.[a-z0-9]{2,4}$/, '').replace(/['’]s\b/g, '').replace(/[^a-z0-9]+/g, ' ').trim() + ' ';
+function guessCategory(name) {
+  const n = norm(name); let best = '', top = 0;
+  for (const [c, words] of Object.entries(HINTS)) {
+    let sc = 0;
+    for (const w of words) if (n.includes(' ' + w + ' ') || n.includes(' ' + w + 's ')) sc += w.includes(' ') ? 3 : 2;
+    if (sc > top) { best = c; top = sc; }
+  }
+  return best || 'Family Resources';
+}
+function guessPerson(name) {
+  const n = norm(name); let best = '', top = 0, tie = false;
+  for (const p of db.people) {
+    const full = norm(p.name).trim(); if (!full) continue;
+    let sc = 0;
+    if (n.includes(' ' + full + ' ')) sc = 100;
+    else { const hit = full.split(' ').filter((t) => t.length >= 3 && n.includes(' ' + t + ' ')); if (hit.length) sc = 10 * hit.length + hit[0].length; }
+    if (sc > top) { best = p.id; top = sc; tie = false; } else if (sc === top && sc > 0) tie = true;
+  }
+  return tie ? '' : best;
+}
+const cleanTitle = (name) => name.replace(/\.[^.]+$/, '').replace(/_/g, ' ').trim();
+
+// ---------- thumbnails and previews (everything is decrypted by the server and drawn here, in memory only) ----------
+let pdfLib = null;
+async function pdfjs() {
+  if (!pdfLib) { pdfLib = await import('/vendor/pdfjs/pdf.min.mjs'); pdfLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.mjs'; }
+  return pdfLib;
+}
+async function loadPdf(fid) {
+  const lib = await pdfjs();
+  const buf = await (await fetch('/api/files/' + fid)).arrayBuffer();
+  return lib.getDocument({ data: new Uint8Array(buf), standardFontDataUrl: '/vendor/pdfjs/standard_fonts/', isEvalSupported: false, enableXfa: false }).promise;
+}
+const isImg = (t) => /^image\/(png|jpe?g|gif|webp)$/.test(t || '');
+const isPdf = (t) => t === 'application/pdf';
+const thumbCache = new Map();
+let thumbBusy = 0; const thumbQ = [];
+function thumbPump() {
+  while (thumbBusy < 2 && thumbQ.length) {
+    const job = thumbQ.shift(); thumbBusy++;
+    makeThumb(job.rec).then(job.done).catch(() => job.done(null)).finally(() => { thumbBusy--; thumbPump(); });
+  }
+}
+async function makeThumb(rec) {
+  const c = document.createElement('canvas');
+  if (isImg(rec.type)) {
+    const bmp = await createImageBitmap(await (await fetch('/api/files/' + rec.id)).blob());
+    const s = 112 / Math.max(bmp.width, bmp.height); c.width = Math.max(1, Math.round(bmp.width * s)); c.height = Math.max(1, Math.round(bmp.height * s));
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  } else if (isPdf(rec.type)) {
+    const pdf = await loadPdf(rec.id), page = await pdf.getPage(1), v0 = page.getViewport({ scale: 1 }), s = 112 / Math.max(v0.width, v0.height), v = page.getViewport({ scale: s });
+    c.width = Math.round(v.width); c.height = Math.round(v.height);
+    const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: v }).promise; pdf.destroy();
+  } else return null;
+  return c.toDataURL('image/jpeg', 0.7);
+}
+let thumbObs = null;
+function hydrateThumbs(root) {
+  if (!thumbObs) thumbObs = new IntersectionObserver((es) => es.forEach((e) => {
+    if (!e.isIntersecting) return;
+    const el = e.target; thumbObs.unobserve(el);
+    const rec = fileOf(el.dataset.fid); if (!rec) return;
+    const put = (u) => { if (u) el.innerHTML = `<img src="${u}" alt="">`; };
+    if (thumbCache.has(rec.id)) return put(thumbCache.get(rec.id));
+    thumbQ.push({ rec, done: (u) => { thumbCache.set(rec.id, u); put(u); } }); thumbPump();
+  }), { rootMargin: '200px' });
+  root.querySelectorAll('.th[data-fid]').forEach((el) => thumbObs.observe(el));
+}
+async function buildPreview(host, rec) {
+  host.innerHTML = '';
+  if (!rec) { host.innerHTML = '<div class="empty">No file attached yet.</div>'; return; }
+  const url = '/api/files/' + rec.id;
+  const bar = `<div class="pv-bar"><b>${esc(rec.name)}</b><span class="muted">${fmtSize(rec.size)}</span><span class="grow"></span><a href="${url}" target="_blank" rel="noopener">Open</a> · <a href="${url}?dl=1">Download</a></div>`;
+  if (isImg(rec.type)) host.innerHTML = bar + `<div class="pv-scroll"><img class="pv-img" src="${url}" alt=""></div>`;
+  else if (rec.type === 'text/plain') { host.innerHTML = bar + '<div class="pv-scroll"><pre class="pv-txt"></pre></div>'; $('.pv-txt', host).textContent = (await (await fetch(url)).text()).slice(0, 30000); }
+  else if (isPdf(rec.type)) {
+    host.innerHTML = bar + '<div class="pv-scroll"><div class="pv-load muted">Loading preview…</div></div>';
+    try {
+      const pdf = await loadPdf(rec.id), box = $('.pv-scroll', host);
+      const w = Math.max(280, box.clientWidth - 8);
+      box.innerHTML = '';
+      for (let n = 1; n <= Math.min(pdf.numPages, 30); n++) {
+        const page = await pdf.getPage(n), v0 = page.getViewport({ scale: 1 }), v = page.getViewport({ scale: (w / v0.width) * (window.devicePixelRatio || 1) });
+        const c = document.createElement('canvas'); c.className = 'pv-page'; c.width = Math.round(v.width); c.height = Math.round(v.height);
+        const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+        box.appendChild(c); await page.render({ canvasContext: ctx, viewport: v }).promise;
+      }
+      if (pdf.numPages > 30) box.insertAdjacentHTML('beforeend', `<div class="muted" style="padding:8px">Showing the first 30 of ${pdf.numPages} pages. Use Open for the full file.</div>`);
+      pdf.destroy();
+    } catch { $('.pv-scroll', host).innerHTML = '<div class="empty">Could not draw a preview. Use Open or Download.</div>'; }
+  } else host.innerHTML = bar + '<div class="empty">No preview for this type of file. Use Download.</div>';
+}
 
 // ---------- nav / render ----------
 function go(v) { view = v; $('.side').classList.remove('open'); render(); }
@@ -119,8 +254,9 @@ function renderNav() {
 function render() {
   renderNav();
   const v = $('#view');
-  if (query) return renderSearch(v);
-  ({ home: renderHome, inbox: renderInbox, reminders: renderReminders, cat: renderCat, contacts: renderContacts, people: renderPeople, person: renderPerson, bitcoin: renderBitcoin, sheet: renderSheet, settings: renderSettings }[view.name] || renderHome)(v);
+  if (query) renderSearch(v);
+  else ({ home: renderHome, inbox: renderInbox, reminders: renderReminders, cat: renderCat, contacts: renderContacts, people: renderPeople, person: renderPerson, bitcoin: renderBitcoin, sheet: renderSheet, settings: renderSettings }[view.name] || renderHome)(v);
+  hydrateThumbs(v);
 }
 
 // ---------- bitcoin helpers ----------
@@ -136,30 +272,41 @@ function btcTotals(s) {
   return { sats, ok, usd: s.price ? (sats / 1e8) * s.price : null };
 }
 
-// ---------- views ----------
-function itemRow(i) {
-  const p = person(i.personId);
-  return `<div class="row" data-item="${i.id}"><span class="ic">${CAT_ICON[i.category] || '📄'}</span><div class="grow"><div class="t">${esc(i.title)}</div>
-    <div class="s">${esc(i.category)}${p ? ' · ' + esc(p.name) : ''}${i.files && i.files.length ? ' · ' + i.files.length + ' file' + (i.files.length > 1 ? 's' : '') : ''}</div></div>${i.expires ? dueBadge(i.expires) : ''}</div>`;
+// ---------- list pieces ----------
+function itemRow(i, opts = {}) {
+  const p = person(i.personId), f = (i.files || []).map(fileOf).find(Boolean);
+  const th = f && (isImg(f.type) || isPdf(f.type)) ? `<span class="th" data-fid="${esc(f.id)}">${CAT_ICON[i.category] || '📄'}</span>` : `<span class="th plain">${CAT_ICON[i.category] || '📄'}</span>`;
+  return `<div class="row" data-item="${i.id}">${th}<div class="grow"><div class="t">${esc(i.title)}</div>
+    <div class="s">${opts.noCat ? '' : esc(i.category)}${p && !opts.noPerson ? (opts.noCat ? '' : ' · ') + esc(p.name) : ''}${i.files && i.files.length ? ((opts.noCat && (!p || opts.noPerson)) ? '' : ' · ') + i.files.length + ' file' + (i.files.length > 1 ? 's' : '') : ''}</div></div>${i.expires ? dueBadge(i.expires) : ''}</div>`;
 }
 function bindItems(root) { root.querySelectorAll('[data-item]').forEach((e) => (e.onclick = () => itemDialog(db.items.find((i) => i.id === e.dataset.item)))); }
+function groupHead(p, n) { return `<div class="grp">${p ? avatar(p, 'sm') : '<div class="avatar sm fam">👪</div>'}<b>${esc(p ? p.name : 'Whole family')}</b><span class="muted">${n} item${n === 1 ? '' : 's'}</span></div>`; }
+function byPerson(items) {
+  const groups = db.people.map((p) => [p, items.filter((i) => i.personId === p.id)]).filter(([, l]) => l.length);
+  const rest = items.filter((i) => !i.personId || !person(i.personId));
+  if (rest.length) groups.push([null, rest]);
+  return groups.map(([p, l]) => groupHead(p, l.length) + `<div class="list">${l.map((i) => itemRow(i, { noCat: true, noPerson: true })).join('')}</div>`).join('');
+}
 
+// ---------- views ----------
 function renderHome(v) {
   const up = upcoming().slice(0, 5), n = inbox().length, due = upcoming().filter((u) => daysUntil(u.date) <= 30).length;
   const recent = db.items.filter((i) => i.reviewed !== false).slice().sort((a, b) => (b.created || '').localeCompare(a.created || '')).slice(0, 6);
-  v.innerHTML = `<div class="head"><div><h2>Welcome home</h2><div class="muted">Everything here is encrypted with your passphrase.</div></div></div>
+  v.innerHTML = `<div class="head"><div><h2 class="fam-title">${esc(famName())}</h2><div class="muted">Everything here is encrypted with your passphrase.</div></div><div class="avs">${db.people.slice(0, 7).map((p) => avatar(p, 'sm')).join('')}</div></div>
+    ${S.legacy ? `<div class="suggest" style="margin-bottom:14px"><div class="grow"><b>Upgrade your vault's encryption</b><div class="muted">This vault uses the older, weaker key setup. The upgrade takes a minute, keeps all your data, and makes the passphrase much harder to crack.</div></div><button class="primary" id="up1">Upgrade now</button></div>` : ''}
     <div class="stats">
       <div class="stat"><div class="n">${db.items.filter((i) => i.reviewed !== false).length}</div><div class="l">Documents</div></div>
       <div class="stat"><div class="n">${n}</div><div class="l">To review</div></div>
       <div class="stat"><div class="n">${due}</div><div class="l">Due in 30 days</div></div>
       ${db.wallets.length ? `<div class="stat btc-card" id="btc-home" style="cursor:pointer"><div class="n">₿ …</div><div class="l">Bitcoin tracked</div></div>` : ''}
     </div>
-    ${n ? `<div class="suggest" style="margin-top:14px"><div class="grow"><b>${n} new file${n > 1 ? 's' : ''} to review</b><div class="muted">Check the suggested category and accept.</div></div><button class="primary" id="gi">Review</button></div>` : ''}
+    ${n ? `<div class="suggest" style="margin-top:14px"><div class="grow"><b>${n} new file${n > 1 ? 's' : ''} to review</b><div class="muted">Check the suggested category and person, then accept.</div></div><button class="primary" id="gi">Review</button></div>` : ''}
     <div class="drop" id="drop">Drop files here or click to upload</div>
-    <h3>Coming up</h3><div class="list">${up.length ? up.map((u) => `<div class="row"><span class="ic">⏰</span><div class="grow"><div class="t">${esc(u.title)}</div></div>${dueBadge(u.date)}</div>`).join('') : '<div class="empty">Nothing due. Add an expiry date to a document or create a reminder.</div>'}</div>
+    <h3>Coming up</h3><div class="list">${up.length ? up.map((u) => `<div class="row"><span class="th plain">⏰</span><div class="grow"><div class="t">${esc(u.title)}</div></div>${dueBadge(u.date)}</div>`).join('') : '<div class="empty">Nothing due. Add an expiry date to a document or create a reminder.</div>'}</div>
     <h3>People</h3><div class="cards">${db.people.map(personCard).join('')}<div class="card" id="addp" style="display:flex;align-items:center;justify-content:center;color:var(--mute)">+ Add a person</div></div>
-    <h3>Recently added</h3><div class="list">${recent.length ? recent.map(itemRow).join('') : '<div class="empty">No documents yet.</div>'}</div>`;
+    <h3>Recently added</h3><div class="list">${recent.length ? recent.map((i) => itemRow(i)).join('') : '<div class="empty">No documents yet.</div>'}</div>`;
   if ($('#gi')) $('#gi').onclick = () => go({ name: 'inbox' });
+  if ($('#up1')) $('#up1').onclick = upgradeDialog;
   $('#addp').onclick = () => personDialog();
   bindPersonCards(v); bindItems(v); bindDrop($('#drop'));
   if (db.wallets.length) {
@@ -177,21 +324,27 @@ function bindPersonCards(r) { r.querySelectorAll('[data-person]').forEach((e) =>
 function renderCat(v) {
   const items = db.items.filter((i) => i.category === view.cat && i.reviewed !== false);
   v.innerHTML = `<div class="head"><h2>${CAT_ICON[view.cat]} ${esc(view.cat)}</h2><button class="primary" id="a">+ Add to ${esc(view.cat)}</button></div>
-    ${view.cat === 'Passwords' ? '<div class="muted">Logins are stored inside the encrypted vault.</div>' : ''}
+    <div class="muted">${view.cat === 'Passwords' ? 'Logins are stored inside the encrypted vault. ' : ''}Grouped by family member.</div>
     <div class="drop" id="drop" style="margin-top:12px">Drop files here to add to ${esc(view.cat)}</div>
-    <div class="list">${items.length ? items.map(itemRow).join('') : '<div class="empty">Nothing here yet.</div>'}</div>`;
+    ${items.length ? byPerson(items) : '<div class="list"><div class="empty">Nothing here yet.</div></div>'}`;
   $('#a').onclick = () => itemDialog(null, { category: view.cat });
-  bindItems(v); bindDrop($('#drop'), view.cat);
+  bindItems(v); bindDrop($('#drop'), { cat: view.cat });
 }
 
 function renderInbox(v) {
   const items = inbox();
-  v.innerHTML = `<div class="head"><div><h2>📥 Inbox</h2><div class="muted">New uploads wait here until you confirm where they belong.</div></div>${items.length > 1 ? '<button class="primary" id="all">Accept all</button>' : ''}</div>
+  v.innerHTML = `<div class="head"><div><h2>📥 Inbox</h2><div class="muted">New uploads wait here. The category and person are best guesses from the file name, so fix any that are wrong.</div></div>${items.length > 1 ? '<button class="primary" id="all">Accept all</button>' : ''}</div>
     <div class="drop" id="drop">Drop files here or click to upload</div>
-    ${items.length ? items.map((i) => `<div class="suggest" data-id="${i.id}"><div class="grow"><b>${esc(i.title)}</b><div class="muted">Suggested: ${esc(i.category)}${i.files && i.files[0] && fileOf(i.files[0]) ? ' · ' + fmtSize(fileOf(i.files[0]).size) : ''}</div></div><button class="primary acc">Accept</button><button class="rev">Review</button></div>`).join('') : '<div class="empty">Inbox is empty.</div>'}`;
+    ${items.length ? items.map((i) => { const f = (i.files || []).map(fileOf).find(Boolean);
+      return `<div class="suggest inb" data-id="${i.id}">${f && (isImg(f.type) || isPdf(f.type)) ? `<span class="th" data-fid="${esc(f.id)}">📄</span>` : '<span class="th plain">📄</span>'}
+        <div class="grow"><b>${esc(i.title)}</b><div class="muted">${f ? fmtSize(f.size) : ''}</div>
+        <div class="inb-sel"><select class="ic-cat">${opts(CATS.map((c) => [c, c]), i.category)}</select><select class="ic-who">${opts([['', 'Whole family'], ...db.people.map((p) => [p.id, p.name])], i.personId)}</select></div></div>
+        <button class="primary acc">Accept</button><button class="rev">Review</button></div>`; }).join('') : '<div class="empty">Inbox is empty.</div>'}`;
   bindDrop($('#drop'));
   v.querySelectorAll('.suggest').forEach((el) => {
     const it = db.items.find((i) => i.id === el.dataset.id);
+    el.querySelector('.ic-cat').onchange = (e) => { it.category = e.target.value; };
+    el.querySelector('.ic-who').onchange = (e) => { it.personId = e.target.value; };
     el.querySelector('.acc').onclick = async () => { it.reviewed = true; await save(); render(); };
     el.querySelector('.rev').onclick = () => itemDialog(it);
   });
@@ -202,6 +355,7 @@ function renderReminders(v) {
   const up = upcoming(), done = db.reminders.filter((r) => r.done);
   v.innerHTML = `<div class="head"><h2>⏰ Reminders</h2><button class="primary" id="a">+ New reminder</button></div>
     <div class="list">${up.length ? up.map((u) => `<div class="row" data-k="${u.kind}" data-id="${u.id}"><div class="grow"><div class="t">${esc(u.title)}</div><div class="s">${u.kind === 'item' ? 'From a document expiry date' : 'Reminder'}</div></div>${dueBadge(u.date)}${u.kind === 'rem' ? '<button class="small chk">Done</button>' : ''}</div>`).join('') : '<div class="empty">No reminders.</div>'}</div>
+    <p class="muted" style="font-size:.85em">Want a phone alert? Set up ntfy notifications in Settings.</p>
     ${done.length ? `<h3>Done</h3><div class="list">${done.map((r) => `<div class="row"><div class="grow s">${esc(r.title)} · ${fmtDate(r.date)}</div><button class="small danger del" data-id="${r.id}">Delete</button></div>`).join('')}</div>` : ''}`;
   $('#a').onclick = reminderDialog;
   v.querySelectorAll('.row[data-k]').forEach((el) => {
@@ -212,7 +366,7 @@ function renderReminders(v) {
   v.querySelectorAll('.del').forEach((b) => (b.onclick = async () => { db.reminders = db.reminders.filter((r) => r.id !== b.dataset.id); await save(); render(); }));
 }
 
-const contactRow = (c) => `<div class="row" data-c="${c.id}"><span class="ic">📇</span><div class="grow"><div class="t">${esc(c.name)}</div><div class="s">${esc([c.role, c.phone, c.email].filter(Boolean).join(' · '))}</div></div></div>`;
+const contactRow = (c) => `<div class="row" data-c="${c.id}"><span class="th plain">📇</span><div class="grow"><div class="t">${esc(c.name)}</div><div class="s">${esc([c.role, c.phone, c.email].filter(Boolean).join(' · '))}</div></div></div>`;
 function renderContacts(v) {
   v.innerHTML = `<div class="head"><h2>📇 Contacts</h2><button class="primary" id="a">+ Add contact</button></div>
     <div class="muted">Doctors, lawyers, accountants, agents: the people you call when it matters.</div><div class="list" style="margin-top:12px">${db.contacts.length ? db.contacts.slice().sort((a, b) => a.name.localeCompare(b.name)).map(contactRow).join('') : '<div class="empty">No contacts yet.</div>'}</div>`;
@@ -228,23 +382,32 @@ function renderPeople(v) {
 function renderPerson(v) {
   const p = person(view.id); if (!p) return go({ name: 'people' });
   const items = db.items.filter((i) => i.personId === p.id && i.reviewed !== false);
+  const groups = CATS.map((c) => [c, items.filter((i) => i.category === c)]).filter(([, l]) => l.length);
   v.innerHTML = `<div class="head"><div class="hero">${avatar(p, 'lg')}<div><h2>${esc(p.name)}</h2><div class="muted">${p.birthday ? 'Born ' + fmtDate(p.birthday) : ''}${p.birthday && p.note ? ' · ' : ''}${esc(p.note || '')}</div></div></div><div><button id="e">Edit</button> <button class="primary" id="a">+ Add document</button></div></div>
-    <div class="list" style="margin-top:14px">${items.length ? items.map(itemRow).join('') : '<div class="empty">No documents filed for ' + esc(p.name) + ' yet.</div>'}</div>`;
+    <div class="drop" id="drop" style="margin-top:14px">Drop files here to add them for ${esc(p.name)}</div>
+    ${groups.length ? groups.map(([c, l]) => `<div class="grp"><span class="ic">${CAT_ICON[c]}</span><b>${esc(c)}</b><span class="muted">${l.length}</span></div><div class="list">${l.map((i) => itemRow(i, { noCat: true, noPerson: true })).join('')}</div>`).join('') : `<div class="list"><div class="empty">No documents filed for ${esc(p.name)} yet.</div></div>`}`;
   $('#e').onclick = () => personDialog(p); $('#a').onclick = () => itemDialog(null, { personId: p.id });
-  bindItems(v);
+  bindItems(v); bindDrop($('#drop'), { personId: p.id });
 }
 
+function walletBalanceCell(w, r, s) {
+  if (!r) return '';
+  if (r.error) return `<span class="pill bad" title="${esc(r.error)}">error</span>`;
+  const used = r.txCount > 0;
+  return `<b>₿ ${fmtBtc(r.confirmed)}</b>${r.pending ? ' <span class="pill warn">pending</span>' : ''}${s.price ? `<div class="s">${fmtUsd((r.confirmed / 1e8) * s.price)}</div>` : ''}<div class="s">${used ? `${r.txCount} transaction${r.txCount === 1 ? '' : 's'}${!w.xpub && r.confirmed === 0 ? ' · emptied' : ''}` : 'never used'}${w.xpub ? ` · ${r.scanned} addresses checked` : ''}</div>`;
+}
 function renderBitcoin(v) {
   const wallets = db.wallets, notes = db.bitcoin, st = db.settings || {};
   v.innerHTML = `<div class="head"><div><h2>₿ Bitcoin</h2><div class="muted">Where your Bitcoin is, how to get to it, and a live view of the wallets you track.</div></div></div>
     <h3>Wallet tracker</h3>
     <div class="stats" id="btc-stats"><div class="stat btc-card"><div class="n">…</div><div class="l">Total</div></div></div>
-    <div class="list" style="margin-top:14px">${wallets.length ? wallets.map((w) => `<div class="row" data-w="${w.id}"><span class="ic">₿</span><div class="grow"><div class="t">${esc(w.label || 'Wallet')}${w.personId && person(w.personId) ? ' · ' + esc(person(w.personId).name) : ''}</div><div class="s addr">${esc(w.address)}</div></div><div class="bal" data-bal="${w.id}">…</div></div>`).join('') : '<div class="empty">No wallets tracked yet. Add a public address to watch its balance.</div>'}</div>
-    <div class="btns" style="justify-content:flex-start"><button class="primary" id="aw">+ Track an address</button></div>
-    <p class="muted" style="font-size:.85em">${st.btcLookups === false ? 'Live lookups are turned off in Settings.' : `Only public addresses are looked up, using <b>${esc((st.btcApi || '').replace(/^https?:\/\//, ''))}</b>. Change this (for example to your own Mempool node) in Settings. Never enter seed phrases or private keys here.`}</p>
+    <div class="list" style="margin-top:14px">${wallets.length ? wallets.map((w) => `<div class="row" data-w="${w.id}"><span class="th plain">₿</span><div class="grow"><div class="t">${esc(w.label || 'Wallet')}${w.personId && person(w.personId) ? ' · ' + esc(person(w.personId).name) : ''} <span class="pill">${w.xpub ? 'wallet key' : 'single address'}</span></div><div class="s addr">${esc(w.xpub || w.address)}</div></div><div class="bal" data-bal="${w.id}">…</div></div>`).join('') : '<div class="empty">No wallets tracked yet.</div>'}</div>
+    <div class="btns" style="justify-content:flex-start"><button class="primary" id="aw">+ Track a wallet</button></div>
+    <div class="suggest"><div class="grow"><b>Why does a wallet show 0?</b><div class="muted">A single address is just one of hundreds a wallet creates, and wallets move coins to fresh addresses as you spend. To see a whole wallet's balance, track its <b>wallet key</b> (xpub, ypub or zpub, found in the wallet's “export / public key” screen). Custodial accounts like Cash App and multisig vaults can't be tracked from a single key.</div></div></div>
+    <p class="muted" style="font-size:.85em">${st.btcLookups === false ? 'Live lookups are turned off in Settings.' : `Only public keys and addresses are looked up, using <b>${esc((st.btcApi || '').replace(/^https?:\/\//, ''))}</b>. A wallet key lets that server see all of the wallet's addresses, so for real privacy point this at your own Mempool node in Settings. Never enter seed phrases or private keys here.`}</p>
     <h3>Where everything is</h3>
     <div class="suggest"><div class="grow"><b>Write down where things are, not the secrets themselves.</b><div class="muted">For example: “Ledger is in the gun safe, seed card in the safe-deposit box at First Bank, PIN hint in the Passwords category.” Add instructions your family could follow if you were not around.</div></div></div>
-    <div class="list">${notes.length ? notes.map((n) => `<div class="row" data-n="${n.id}"><span class="ic">🗝️</span><div class="grow"><div class="t">${esc(n.title)}</div><div class="s">${esc(n.kind)}${n.location ? ' · ' + esc(n.location) : ''}</div></div></div>`).join('') : '<div class="empty">Nothing recorded yet.</div>'}</div>
+    <div class="list">${notes.length ? notes.map((n) => `<div class="row" data-n="${n.id}"><span class="th plain">🗝️</span><div class="grow"><div class="t">${esc(n.title)}</div><div class="s">${esc(n.kind)}${n.location ? ' · ' + esc(n.location) : ''}</div></div></div>`).join('') : '<div class="empty">Nothing recorded yet.</div>'}</div>
     <div class="btns" style="justify-content:flex-start"><button class="primary" id="an">+ Add instructions</button></div>`;
   $('#aw').onclick = () => walletDialog(); $('#an').onclick = () => noteDialog();
   v.querySelectorAll('[data-w]').forEach((e) => (e.onclick = () => walletDialog(db.wallets.find((w) => w.id === e.dataset.w))));
@@ -255,12 +418,9 @@ function renderBitcoin(v) {
     $('#btc-stats').innerHTML = !wallets.length ? '' : t
       ? `<div class="stat btc-card"><div class="n">₿ ${fmtBtc(t.sats)}</div><div class="l">Total balance</div></div>${t.usd != null ? `<div class="stat"><div class="n">${fmtUsd(t.usd)}</div><div class="l">Value (USD)</div></div><div class="stat"><div class="n">${fmtUsd(s.price)}</div><div class="l">Price of 1 BTC</div></div>` : ''}`
       : `<div class="stat"><div class="n">—</div><div class="l">${s && !s.enabled ? 'Lookups are off' : 'Lookup unavailable'}</div></div>`;
-    for (const w of wallets) {
-      const r = s && s.wallets && s.wallets.find((x) => x.id === w.id), el = v.querySelector(`[data-bal="${w.id}"]`); if (!el) continue;
-      el.innerHTML = !r ? '' : r.error ? `<span class="pill bad" title="${esc(r.error)}">error</span>` : `<b>₿ ${fmtBtc(r.confirmed)}</b>${r.pending ? ' <span class="pill warn">pending</span>' : ''}${s.price ? `<div class="s">${fmtUsd((r.confirmed / 1e8) * s.price)}</div>` : ''}`;
-    }
+    for (const w of wallets) { const el = v.querySelector(`[data-bal="${w.id}"]`); if (el) el.innerHTML = walletBalanceCell(w, s && s.wallets && s.wallets.find((x) => x.id === w.id), s || {}); }
   };
-  if (wallets.length) loadBtc().then(fill); else fill(null);
+  if (wallets.length) { loadBtc().then(fill); const el = $('#btc-stats'); if (el) el.insertAdjacentHTML('afterend', '<div class="muted" style="font-size:.85em">Scanning wallet keys can take a few seconds.</div>'); } else fill(null);
 }
 
 function renderSheet(v) {
@@ -273,7 +433,7 @@ function renderSheet(v) {
     <h3>Who to call</h3>${cons.length ? `<table>${cons.map((c) => `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.role || '')}</td><td>${esc(c.phone || '')}</td><td>${esc(c.email || '')}</td></tr>`).join('')}</table>` : '<div class="muted">No contacts added.</div>'}
     <h3>Documents on file</h3>${byCat.length ? byCat.map(([c, l]) => `<div><b>${esc(c)}:</b> ${l.map((i) => esc(i.title)).join(', ')}</div>`).join('') : '<div class="muted">No documents yet.</div>'}
     <h3>Bitcoin</h3>${db.bitcoin.length ? db.bitcoin.map((n) => `<div style="margin-bottom:8px"><b>${esc(n.title)}</b> (${esc(n.kind)})${n.location ? '<br>Where: ' + esc(n.location) : ''}${n.notes ? '<br>' + esc(n.notes).replace(/\n/g, '<br>') : ''}</div>`).join('') : '<div class="muted">Nothing recorded.</div>'}
-    ${db.wallets.length ? `<div style="margin-top:8px"><b>Tracked addresses</b></div><table>${db.wallets.map((w) => `<tr><td>${esc(w.label || '')}</td><td style="word-break:break-all">${esc(w.address)}</td></tr>`).join('')}</table>` : ''}
+    ${db.wallets.length ? `<div style="margin-top:8px"><b>Tracked wallets</b></div><table>${db.wallets.map((w) => `<tr><td>${esc(w.label || '')}</td><td style="word-break:break-all">${esc(w.xpub || w.address)}</td></tr>`).join('')}</table>` : ''}
     <h3>Other notes</h3><div class="line"></div><div class="line"></div><div class="line"></div></div>`;
   $('#pr').onclick = () => window.print();
 }
@@ -281,51 +441,66 @@ function renderSheet(v) {
 function renderSearch(v) {
   const q = query.toLowerCase();
   const hit = (...s) => s.some((x) => String(x || '').toLowerCase().includes(q));
-  const items = db.items.filter((i) => hit(i.title, i.notes, i.category, i.username, i.url, (i.files || []).map((f) => (fileOf(f) || {}).name).join(' ')));
+  const items = db.items.filter((i) => hit(i.title, i.notes, i.category, i.username, i.url, (person(i.personId) || {}).name, (i.files || []).map((f) => (fileOf(f) || {}).name).join(' ')));
   const ppl = db.people.filter((p) => hit(p.name, p.note));
   const cons = db.contacts.filter((c) => hit(c.name, c.role, c.email, c.phone, c.notes));
   const btc = db.bitcoin.filter((n) => hit(n.title, n.kind, n.location, n.notes));
-  const wal = db.wallets.filter((w) => hit(w.label, w.address, w.notes));
+  const wal = db.wallets.filter((w) => hit(w.label, w.address, w.xpub, w.notes));
   v.innerHTML = `<h2>Results for “${esc(query)}”</h2>
     ${ppl.length ? `<h3>People</h3><div class="cards">${ppl.map(personCard).join('')}</div>` : ''}
-    <h3>Documents</h3><div class="list">${items.length ? items.map(itemRow).join('') : '<div class="empty">No matching documents.</div>'}</div>
+    <h3>Documents</h3><div class="list">${items.length ? items.map((i) => itemRow(i)).join('') : '<div class="empty">No matching documents.</div>'}</div>
     ${cons.length ? `<h3>Contacts</h3><div class="list">${cons.map(contactRow).join('')}</div>` : ''}
-    ${btc.length || wal.length ? `<h3>Bitcoin</h3><div class="list">${btc.map((n) => `<div class="row" data-n="${n.id}"><span class="ic">🗝️</span><div class="grow"><div class="t">${esc(n.title)}</div><div class="s">${esc(n.kind)}</div></div></div>`).join('')}${wal.map((w) => `<div class="row" data-w="${w.id}"><span class="ic">₿</span><div class="grow"><div class="t">${esc(w.label)}</div><div class="s addr">${esc(w.address)}</div></div></div>`).join('')}</div>` : ''}`;
+    ${btc.length || wal.length ? `<h3>Bitcoin</h3><div class="list">${btc.map((n) => `<div class="row" data-n="${n.id}"><span class="th plain">🗝️</span><div class="grow"><div class="t">${esc(n.title)}</div><div class="s">${esc(n.kind)}</div></div></div>`).join('')}${wal.map((w) => `<div class="row" data-w="${w.id}"><span class="th plain">₿</span><div class="grow"><div class="t">${esc(w.label)}</div><div class="s addr">${esc(w.xpub || w.address)}</div></div></div>`).join('')}</div>` : ''}`;
   bindItems(v); bindPersonCards(v);
   v.querySelectorAll('[data-c]').forEach((e) => (e.onclick = () => contactDialog(db.contacts.find((c) => c.id === e.dataset.c))));
   v.querySelectorAll('[data-n]').forEach((e) => (e.onclick = () => noteDialog(db.bitcoin.find((n) => n.id === e.dataset.n))));
   v.querySelectorAll('[data-w]').forEach((e) => (e.onclick = () => walletDialog(db.wallets.find((w) => w.id === e.dataset.w))));
 }
 
-function renderSettings(v) {
+async function renderSettings(v) {
   const st = db.settings;
+  let nt = {}; try { nt = await api('/api/ntfy'); } catch {}
+  S = await api('/api/status').catch(() => S);
+  if (view.name !== 'settings') return;
   v.innerHTML = `<h2>⚙️ Settings</h2>
   <h3>Theme</h3><div class="list"><div class="themes">${THEMES.map((t) => `<button class="theme-opt ${curTheme() === t.id ? 'on' : ''}" data-t="${t.id}"><div class="sw">${t.sw.map((c) => `<i style="background:${c}"></i>`).join('')}</div><div class="nm">${t.name}</div></button>`).join('')}</div></div>
-  <h3>Security</h3><div class="list"><div class="row" style="cursor:default"><div class="grow"><div class="t">Auto-lock</div><div class="s">Lock the vault after this much inactivity.</div></div>
+  <h3>Family</h3><div class="list"><div class="row" style="cursor:default;display:block"><label style="margin:0">Family name (shown on the home page)<input id="fn" maxlength="60" value="${esc(st.familyName || '')}" placeholder="e.g. Gump Family"></label><div class="btns"><button id="fns">Save</button></div></div></div>
+  <h3>Security</h3><div class="list"><div class="row" style="cursor:default"><div class="grow"><div class="t">Auto-lock</div><div class="s">Lock this browser after this much inactivity.</div></div>
     <select id="al" style="width:auto"><option value="5">5 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">1 hour</option><option value="240">4 hours</option><option value="0">Never</option></select></div>
-    <div class="row" id="cp"><div class="grow"><div class="t">Change passphrase</div><div class="s">Re-encrypts every file with the new passphrase.</div></div></div></div>
-  <h3>Bitcoin lookups</h3><div class="list"><div class="row" style="cursor:default"><div class="grow"><div class="t">Look up balances of tracked addresses</div><div class="s">Sends only the public addresses you track, never anything else.</div></div><input type="checkbox" id="bl" style="width:auto" ${st.btcLookups !== false ? 'checked' : ''}></div>
+    ${S.legacy ? `<div class="row" id="up2"><span class="th plain">⬆️</span><div class="grow"><div class="t">Upgrade encryption (recommended)</div><div class="s">Moves this vault to the stronger key setup. Keeps all your data.</div></div></div>`
+      : `<div class="row" id="cp"><span class="th plain">🔑</span><div class="grow"><div class="t">Change passphrase</div><div class="s">Instant, and your files stay safe.</div></div></div>`}</div>
+  <h3>Alerts (ntfy)</h3><div class="list" id="ntfy"><div class="row" style="cursor:default;display:block">
+    <label class="inl"><input type="checkbox" id="n-on" ${nt.enabled ? 'checked' : ''} style="width:auto"> Send me phone alerts for expiring documents and reminders</label>
+    <div class="grid2"><label>ntfy server<input id="n-srv" value="${esc(nt.server || 'https://ntfy.sh')}"></label>
+    <label>Topic <a href="#" id="n-gen" style="float:right">generate a private one</a><input id="n-top" class="secret" value="${esc(nt.topic || '')}" placeholder="fv-… (keep it secret)" autocomplete="off"></label>
+    <label>Access token (optional) ${nt.tokenSet ? '<span class="pill">saved</span>' : ''}<input id="n-tok" type="password" placeholder="${nt.tokenSet ? 'leave blank to keep the saved token' : 'only for private servers'}" autocomplete="off"></label>
+    <label>Send at<select id="n-hr">${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${h === (nt.hour ?? 8) ? 'selected' : ''}>${h === 0 ? '12 am' : h < 12 ? h + ' am' : h === 12 ? '12 pm' : h - 12 + ' pm'}</option>`).join('')}</select></label></div>
+    <div class="s" style="margin:4px 0 8px">Alert me this many days before:</div>
+    <div class="chips" id="n-days">${[30, 14, 7, 3, 1, 0].map((d) => `<label class="chip"><input type="checkbox" value="${d}" ${(nt.days || [30, 7, 1, 0]).includes(d) ? 'checked' : ''}> ${d === 0 ? 'the day' : d + 'd'}</label>`).join('')}</div>
+    <label class="inl" style="margin-top:10px"><input type="checkbox" id="n-ttl" ${nt.includeTitles ? 'checked' : ''} style="width:auto"> Include document titles in the alert (otherwise it just says “A document is expiring”)</label>
+    <div class="s" style="margin-top:8px">Alerts are sent by your Umbrel even while the vault is locked. To make that possible, a small schedule (dates, plus titles only if ticked) is kept <b>unencrypted</b> on your Umbrel. Anyone who knows your topic name can read your alerts on a public ntfy server, so keep the topic secret or use your own ntfy server. To receive them, install the ntfy app and subscribe to the same topic.</div>
+    <div class="btns"><button id="n-test">Send test</button><button class="primary" id="n-save">Save alerts</button></div></div></div>
+  <h3>Bitcoin lookups</h3><div class="list"><div class="row" style="cursor:default"><div class="grow"><div class="t">Look up balances of tracked wallets</div><div class="s">Sends only the public addresses and keys you track, never anything else.</div></div><input type="checkbox" id="bl" style="width:auto" ${st.btcLookups !== false ? 'checked' : ''}></div>
     <div class="row" style="cursor:default;display:block"><label style="margin:0">Mempool API address<input id="ba" value="${esc(st.btcApi)}"></label><div class="s">Default is the public mempool.space. For full privacy, use your own Mempool node (an Umbrel app), e.g. <span class="addr">http://umbrel.local:3006/api</span>.</div><div class="btns"><button id="bs">Save</button></div></div></div>
-  <h3>Backup</h3><div class="list"><div class="row" style="cursor:default"><div class="grow"><div class="t">Download encrypted backup</div><div class="s">A ZIP of your encrypted vault. It is useless without your passphrase, so you can keep it anywhere.</div></div><a href="/api/backup"><button>Download</button></a></div></div>
-  <h3>About</h3><p class="muted">Family Vault stores everything on your own Umbrel, encrypted with AES-256-GCM using a key derived from your passphrase (scrypt). The key is held in memory only while the vault is unlocked. Free and open source (MIT).</p>`;
+  <h3>Backup</h3><div class="list"><div class="row" style="cursor:default"><div class="grow"><div class="t">Download encrypted backup</div><div class="s">A ZIP of your encrypted vault. Useless without your passphrase, so keep copies somewhere other than this Umbrel. To restore, choose “Restore” on the setup screen of a fresh install.</div></div><a href="/api/backup"><button>Download</button></a></div></div>
+  <h3>About</h3><p class="muted">Family Vault ${esc(S.version || '')} keeps everything on your own Umbrel, encrypted with AES-256-GCM. A random master key encrypts your data, and that key is locked by your passphrase (scrypt). Free and open source (MIT). Not independently audited.</p>`;
   v.querySelectorAll('[data-t]').forEach((b) => (b.onclick = () => { setTheme(b.dataset.t); renderSettings(v); }));
-  api('/api/status').then((s) => ($('#al').value = String(s.autoLockMin)));
+  $('#al').value = String(S.autoLockMin);
   $('#al').onchange = async () => { try { await api('/api/settings', { method: 'POST', json: { autoLockMin: +$('#al').value } }); toast('Saved'); } catch (e) { toast(e.message); } };
   const saveBtc = async () => { db.settings = { ...db.settings, btcLookups: $('#bl').checked, btcApi: $('#ba').value.trim() || 'https://mempool.space/api' }; try { await save(); db = await api('/api/db'); toast('Saved'); } catch (e) { toast(e.message); } };
+  $('#fns').onclick = async () => { db.settings = { ...db.settings, familyName: $('#fn').value.trim() }; try { await save(); db = await api('/api/db'); toast('Saved'); } catch (e) { toast(e.message); } };
   $('#bs').onclick = saveBtc; $('#bl').onchange = saveBtc;
-  $('#cp').onclick = () => dialog(`<h2>Change passphrase</h2><form id="f"><label>Current passphrase<input id="o" type="password" required></label><label>New passphrase (8+ characters)<input id="n" type="password" required></label><label>New passphrase again<input id="n2" type="password" required></label><div class="err muted" id="e"></div><div class="btns"><button type="button" class="ghost" data-close>Cancel</button><button class="primary">Change</button></div></form>`, (d) => {
-    d.querySelector('#f').onsubmit = async (e) => {
-      e.preventDefault();
-      if ($('#n', d).value !== $('#n2', d).value) return ($('#e', d).textContent = 'The new passphrases do not match.');
-      $('#e', d).textContent = 'Re-encrypting…';
-      try { await api('/api/change-passphrase', { method: 'POST', json: { oldPassphrase: $('#o', d).value, newPassphrase: $('#n', d).value } }); d.close(); toast('Passphrase changed'); } catch (x) { $('#e', d).textContent = x.message; }
-    };
-  });
+  if ($('#up2')) $('#up2').onclick = upgradeDialog;
+  if ($('#cp')) $('#cp').onclick = changePassDialog;
+  $('#n-gen').onclick = (e) => { e.preventDefault(); const a = new Uint8Array(12); crypto.getRandomValues(a); $('#n-top').value = 'fv-' + [...a].map((x) => x.toString(36).padStart(2, '0')).join('').slice(0, 20); };
+  const ntBody = () => ({ enabled: $('#n-on').checked, server: $('#n-srv').value.trim(), topic: $('#n-top').value.trim(), token: $('#n-tok').value, hour: +$('#n-hr').value, tz: -new Date().getTimezoneOffset(), days: [...document.querySelectorAll('#n-days input:checked')].map((i) => +i.value), includeTitles: $('#n-ttl').checked });
+  $('#n-save').onclick = async () => { try { await api('/api/ntfy', { method: 'PUT', json: ntBody() }); toast('Alert settings saved'); renderSettings(v); } catch (e) { toast(e.message); } };
+  $('#n-test').onclick = async () => { try { await api('/api/ntfy', { method: 'PUT', json: ntBody() }); await api('/api/ntfy/test', { method: 'POST' }); toast('Test sent. Check your phone.'); } catch (e) { toast(e.message); } };
 }
 
 // ---------- dialogs ----------
-function dialog(html, bind) {
-  const d = $('#dlg'); d.innerHTML = `<div class="dlg">${html}</div>`;
+function dialog(html, bind, wide) {
+  const d = $('#dlg'); d.className = wide ? 'wide' : ''; d.innerHTML = `<div class="dlg">${html}</div>`;
   d.querySelectorAll('[data-close]').forEach((b) => (b.onclick = () => d.close()));
   if (!d.open) d.showModal();
   bind && bind(d);
@@ -338,10 +513,49 @@ function genPassword(n = 20) {
   return [...a].map((x) => set[x % set.length]).join('');
 }
 
+function changePassDialog() {
+  dialog(`<h2>Change passphrase</h2><form id="f"><label>Current passphrase<input id="o" type="password" required></label><label>New passphrase (12+ characters)<input id="n" type="password" required></label><div id="m">${meterHtml()}</div><label>New passphrase again<input id="n2" type="password" required></label><div class="err muted" id="e"></div><div class="btns"><button type="button" class="ghost" data-close>Cancel</button><button class="primary">Change</button></div></form>`, (d) => {
+    meterBind($('#m', d), $('#n', d));
+    $('#f', d).onsubmit = async (e) => {
+      e.preventDefault();
+      if ($('#n', d).value !== $('#n2', d).value) return ($('#e', d).textContent = 'The new passphrases do not match.');
+      if (!strength($('#n', d).value).ok) return ($('#e', d).textContent = 'Please choose a stronger passphrase.');
+      $('#e', d).textContent = 'Working…';
+      try { await api('/api/change-passphrase', { method: 'POST', json: { oldPassphrase: $('#o', d).value, newPassphrase: $('#n', d).value } }); d.close(); toast('Passphrase changed'); } catch (x) { $('#e', d).textContent = x.message; }
+    };
+  });
+}
+function upgradeDialog() {
+  dialog(`<h2>Upgrade encryption</h2><p class="muted">Your vault will be re-encrypted with a stronger key setup. All files and records are kept. It is safe: if anything goes wrong, nothing changes. Choose a new passphrase (you can reuse your current one only if it is strong).</p>
+    <form id="f"><label>New passphrase (12+ characters)<input id="n" type="password" required></label><div id="m">${meterHtml()}</div><label>Type it again<input id="n2" type="password" required></label><div class="err muted" id="e"></div><div class="btns"><button type="button" class="ghost" data-close>Cancel</button><button class="primary">Upgrade</button></div></form>`, (d) => {
+    meterBind($('#m', d), $('#n', d));
+    $('#f', d).onsubmit = async (e) => {
+      e.preventDefault();
+      if ($('#n', d).value !== $('#n2', d).value) return ($('#e', d).textContent = 'The passphrases do not match.');
+      if (!strength($('#n', d).value).ok) return ($('#e', d).textContent = 'Please choose a stronger passphrase.');
+      try { await api('/api/upgrade', { method: 'POST', json: { newPassphrase: $('#n', d).value } }); upgradeProgress(); } catch (x) { $('#e', d).textContent = x.message; }
+    };
+  });
+}
+async function upgradeProgress() {
+  const d = dialog('<h2>Upgrading…</h2><p id="up-t" class="muted">Starting…</p><div class="meter"><i id="up-b" class="good" style="width:3%"></i></div><p class="muted">Keep this page open. Large vaults can take a few minutes.</p>');
+  d.oncancel = (e) => e.preventDefault();
+  for (;;) {
+    await sleep(700);
+    let st; try { st = await api('/api/status'); } catch { continue; }
+    const u = st.upgrade || {};
+    if (u.error) { d.oncancel = null; $('#up-t', d).textContent = u.error; d.insertAdjacentHTML('beforeend', '<div class="btns"><button data-close>Close</button></div>'); d.querySelector('[data-close]').onclick = () => d.close(); return; }
+    if (u.finished) { S = st; d.oncancel = null; d.close(); toast('Encryption upgraded'); render(); return; }
+    $('#up-t', d).textContent = u.total ? `Re-encrypting file ${Math.min(u.done + 1, u.total)} of ${u.total}…` : 'Preparing…';
+    $('#up-b', d).style.width = Math.max(3, u.total ? Math.round((u.done / u.total) * 100) : 3) + '%';
+  }
+}
+
 function itemDialog(it, pre = {}) {
   const isNew = !it;
   const x = it || { id: uid(), title: '', category: pre.category || 'Family Resources', personId: pre.personId || '', notes: '', expires: '', files: [], reviewed: true, created: today(), ...pre };
-  dialog(`<h2>${isNew ? 'Add document' : 'Edit document'}</h2><form id="f">
+  const touched = { cat: !isNew || !!pre.category, who: !isNew || !!pre.personId, title: !isNew };
+  dialog(`<div class="pvcol" id="pvcol"><div id="pvsel"></div><div id="pv"></div></div><div class="formcol"><h2>${isNew ? 'Add document' : 'Edit document'}</h2><form id="f">
     <label>Title<input id="title" value="${esc(x.title)}" required maxlength="140"></label>
     <div class="grid2"><label>Category<select id="cat">${opts(CATS.map((c) => [c, c]), x.category)}</select></label>
     <label>Belongs to<select id="who">${opts([['', 'Whole family'], ...db.people.map((p) => [p.id, p.name])], x.personId)}</select></label></div>
@@ -350,16 +564,34 @@ function itemDialog(it, pre = {}) {
     <label>Expires / renews (optional)<input id="exp" type="date" value="${esc(x.expires)}"></label>
     <label>Notes<textarea id="notes" rows="3">${esc(x.notes)}</textarea></label>
     <div class="files" id="fl"></div>
-    <div class="btns">${isNew ? '' : '<button type="button" class="danger left" id="del">Delete</button>'}<button type="button" id="att">Attach files</button><button type="button" class="ghost" data-close>Cancel</button><button class="primary">Save</button></div></form>`, (d) => {
+    <div class="btns">${isNew ? '' : '<button type="button" class="danger left" id="del">Delete</button>'}<button type="button" id="att">Attach files</button><button type="button" class="ghost" data-close>Cancel</button><button class="primary">Save</button></div></form></div>`, (d) => {
+    let shown = '';
     const drawFiles = () => {
-      $('#fl', d).innerHTML = (x.files || []).map((id) => { const f = fileOf(id); return f ? `<a href="/api/files/${id}" target="_blank" rel="noopener"><span>${esc(f.name)}</span><span class="muted">${fmtSize(f.size)} <span data-rm="${id}" style="color:var(--bad)">remove</span></span></a>` : ''; }).join('');
+      const recs = (x.files || []).map(fileOf).filter(Boolean);
+      d.classList.toggle('wide', recs.length > 0);
+      $('#pvcol', d).classList.toggle('hidden', !recs.length);
+      $('#pvsel', d).innerHTML = recs.length > 1 ? `<select id="pvpick">${recs.map((r) => `<option value="${esc(r.id)}" ${r.id === shown ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select>` : '';
+      if ($('#pvpick', d)) $('#pvpick', d).onchange = (e) => { shown = e.target.value; buildPreview($('#pv', d), fileOf(shown)); };
+      if (recs.length && !recs.find((r) => r.id === shown)) { shown = recs[0].id; buildPreview($('#pv', d), recs[0]); }
+      $('#fl', d).innerHTML = recs.map((f) => `<a href="/api/files/${f.id}" target="_blank" rel="noopener"><span>${esc(f.name)}</span><span class="muted">${fmtSize(f.size)} <span data-rm="${f.id}" style="color:var(--bad)">remove</span></span></a>`).join('');
       $('#fl', d).querySelectorAll('[data-rm]').forEach((s) => (s.onclick = (e) => { e.preventDefault(); e.stopPropagation(); x.files = x.files.filter((i) => i !== s.dataset.rm); drawFiles(); }));
     };
     drawFiles();
-    $('#cat', d).onchange = () => $('#pwf', d).classList.toggle('hidden', $('#cat', d).value !== 'Passwords');
+    $('#title', d).oninput = () => (touched.title = true);
+    $('#cat', d).onchange = () => { touched.cat = true; $('#pwf', d).classList.toggle('hidden', $('#cat', d).value !== 'Passwords'); };
+    $('#who', d).onchange = () => (touched.who = true);
     $('#showpw', d).onclick = (e) => { e.preventDefault(); const p = $('#pass', d); p.type = p.type === 'password' ? 'text' : 'password'; e.target.textContent = p.type === 'password' ? 'show' : 'hide'; };
     $('#genpw', d).onclick = (e) => { e.preventDefault(); const p = $('#pass', d); p.value = genPassword(); p.type = 'text'; $('#showpw', d).textContent = 'hide'; };
-    $('#att', d).onclick = () => pickFiles(async (list) => { for (const f of list) { const r = await uploadOne(f); if (r) { db.files.push(r); x.files.push(r.id); } } drawFiles(); });
+    $('#att', d).onclick = () => pickFiles(async (list) => {
+      for (const f of list) {
+        const r = await uploadOne(f); if (!r) continue;
+        db.files.push(r); x.files.push(r.id);
+        if (!touched.title) { $('#title', d).value = cleanTitle(f.name); touched.title = true; }          // best guesses from the file name
+        if (!touched.cat) { $('#cat', d).value = guessCategory(f.name); $('#pwf', d).classList.toggle('hidden', $('#cat', d).value !== 'Passwords'); touched.cat = true; }
+        if (!touched.who) { const g = guessPerson(f.name); if (g) { $('#who', d).value = g; touched.who = true; } }
+      }
+      drawFiles();
+    });
     if ($('#del', d)) $('#del', d).onclick = async () => { if (!confirm('Delete this document and its files?')) return; db.items = db.items.filter((i) => i.id !== x.id); db.files = db.files.filter((f) => !x.files.includes(f.id)); await save(); d.close(); render(); };
     $('#f', d).onsubmit = async (e) => {
       e.preventDefault();
@@ -432,24 +664,31 @@ function contactDialog(c) {
   });
 }
 
+const ADDR_RE = /^(bc1[ac-hj-np-z02-9]{11,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/i;
+const XPUB_RE = /^[xyz]pub[1-9A-HJ-NP-Za-km-z]{100,112}$/;
 function walletDialog(w) {
-  const x = w || { id: uid(), label: '', address: '', personId: '', notes: '' };
-  dialog(`<h2>${w ? 'Edit' : 'Track'} a Bitcoin address</h2><form id="f">
-    <label>Label<input id="l" value="${esc(x.label)}" required maxlength="60" placeholder="Cold storage, Savings, Kids' fund…"></label>
-    <label>Public address<input id="a" class="secret" value="${esc(x.address)}" required maxlength="100" placeholder="bc1q… or 1… or 3…" autocomplete="off" spellcheck="false"></label>
+  const x = w || { id: uid(), label: '', address: '', xpub: '', script: 'wpkh', personId: '', notes: '' };
+  dialog(`<h2>${w ? 'Edit' : 'Track a'} wallet</h2><form id="f">
+    <label>Label<input id="l" value="${esc(x.label)}" required maxlength="60" placeholder="Trezor, Savings, Kids' fund…"></label>
+    <label>Wallet key (xpub / ypub / zpub), recommended<input id="xp" class="secret" value="${esc(x.xpub)}" maxlength="120" placeholder="zpub6r… (shows the whole wallet)" autocomplete="off" spellcheck="false"></label>
+    <label id="scr-l" class="${x.xpub && x.xpub.startsWith('xpub') ? '' : 'hidden'}">Address type for this key<select id="scr">${opts([['wpkh', 'Native SegWit (bc1q…), most common'], ['sh-wpkh', 'Nested SegWit (3…)'], ['pkh', 'Legacy (1…)']], x.script || 'wpkh')}</select></label>
+    <div class="muted" style="font-size:.85em;margin:-4px 0 10px">…or track a single address instead:</div>
+    <label>Public address<input id="a" class="secret" value="${esc(x.address)}" maxlength="100" placeholder="bc1q… or 1… or 3…" autocomplete="off" spellcheck="false"></label>
     <label>Belongs to<select id="who">${opts([['', 'Whole family'], ...db.people.map((p) => [p.id, p.name])], x.personId)}</select></label>
     <label>Notes<textarea id="no" rows="2">${esc(x.notes)}</textarea></label>
-    <div class="muted" style="font-size:.85em">Public addresses only. Never enter a seed phrase or private key.</div>
+    <div class="muted" style="font-size:.85em">Public information only. Never enter a seed phrase or private key (xprv, zprv…). A wallet key lets the lookup server see all of this wallet's addresses, so use your own Mempool node if that matters to you.</div>
     <div class="err muted" id="e"></div>
     <div class="btns">${w ? '<button type="button" class="danger left" id="del">Remove</button>' : ''}<button type="button" class="ghost" data-close>Cancel</button><button class="primary">Save</button></div></form>`, (d) => {
-    if ($('#del', d)) $('#del', d).onclick = async () => { if (!confirm('Stop tracking this address?')) return; db.wallets = db.wallets.filter((q) => q.id !== x.id); await save(); d.close(); render(); };
+    $('#xp', d).oninput = () => $('#scr-l', d).classList.toggle('hidden', !$('#xp', d).value.trim().startsWith('xpub'));
+    if ($('#del', d)) $('#del', d).onclick = async () => { if (!confirm('Stop tracking this wallet?')) return; db.wallets = db.wallets.filter((q) => q.id !== x.id); await save(); d.close(); render(); };
     $('#f', d).onsubmit = async (e) => {
       e.preventDefault();
-      const addr = $('#a', d).value.trim();
-      if (!/^(bc1[ac-hj-np-z02-9]{11,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/i.test(addr)) return ($('#e', d).textContent = 'That does not look like a Bitcoin address. A seed phrase or private key must never go here.');
-      Object.assign(x, { label: $('#l', d).value.trim(), address: addr, personId: $('#who', d).value, notes: $('#no', d).value });
+      const xp = $('#xp', d).value.trim(), ad = $('#a', d).value.trim();
+      if (/prv/i.test(xp + ad)) return ($('#e', d).textContent = 'That looks like a private key. Never enter private keys here.');
+      if (xp ? !XPUB_RE.test(xp) : !ADDR_RE.test(ad)) return ($('#e', d).textContent = 'Enter a valid wallet key (xpub/ypub/zpub) or Bitcoin address. A seed phrase must never go here.');
+      Object.assign(x, { label: $('#l', d).value.trim(), xpub: xp, address: xp ? '' : ad, script: $('#scr', d).value, personId: $('#who', d).value, notes: $('#no', d).value });
       if (!w) db.wallets.push(x);
-      await save(); d.close(); render();
+      try { await save(); d.close(); render(); } catch (err) { $('#e', d).textContent = err.message; }
     };
   });
 }
@@ -482,48 +721,49 @@ function reminderDialog() {
 // ---------- uploads ----------
 async function uploadOne(file, avatarFlag) {
   try {
-    const r = await fetch('/api/files', { method: 'PUT', body: file, headers: { 'Content-Type': 'application/octet-stream' } });
+    const r = await fetch('/api/files', { method: 'PUT', body: file, headers: { 'Content-Type': 'application/octet-stream', 'X-FV': '1' } });
+    if (r.status === 423) { await boot(); throw new Error('The vault is locked.'); }
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || 'Upload failed.');
     return { id: data.id, name: file.name, type: file.type || 'application/octet-stream', size: file.size, ...(avatarFlag ? { avatar: true } : {}) };
   } catch (e) { toast(`${file.name}: ${e.message}`); return null; }
 }
 function pickFiles(cb) { const p = $('#picker'); p.value = ''; p.onchange = () => cb([...p.files]); p.click(); }
-async function ingest(list, cat) {
+async function ingest(list, ctx = {}) {
   if (!list.length) return;
   toast(`Encrypting ${list.length} file${list.length > 1 ? 's' : ''}…`);
   for (const f of list) {
     const rec = await uploadOne(f);
     if (!rec) continue;
     db.files.push(rec);
-    db.items.push({ id: uid(), title: f.name.replace(/\.[^.]+$/, ''), category: cat || suggest(f.name), personId: '', notes: '', expires: '', files: [rec.id], reviewed: !!cat, created: today() });
+    db.items.push({ id: uid(), title: cleanTitle(f.name), category: ctx.cat || guessCategory(f.name), personId: ctx.personId || guessPerson(f.name), notes: '', expires: '', files: [rec.id], reviewed: !!(ctx.cat || ctx.personId), created: today() });
   }
   try { await save(); } catch (e) { toast(e.message); }
-  if (!cat) go({ name: 'inbox' }); else render();
+  if (ctx.cat || ctx.personId) render(); else go({ name: 'inbox' });
 }
-function bindDrop(el, cat) {
+function bindDrop(el, ctx) {
   if (!el) return;
-  el.onclick = () => pickFiles((l) => ingest(l, cat));
+  el.onclick = () => pickFiles((l) => ingest(l, ctx));
   el.ondragover = (e) => { e.preventDefault(); el.classList.add('over'); };
   el.ondragleave = () => el.classList.remove('over');
-  el.ondrop = (e) => { e.preventDefault(); el.classList.remove('over'); ingest([...e.dataTransfer.files], cat); };
+  el.ondrop = (e) => { e.preventDefault(); el.classList.remove('over'); ingest([...e.dataTransfer.files], ctx); };
 }
 
 // ---------- wiring ----------
-$('#lock-btn').onclick = async () => { await fetch('/api/lock', { method: 'POST' }); db = null; query = ''; btcSummary = null; $('#search').value = ''; boot(); };
+$('#lock-btn').onclick = async () => { await fetch('/api/lock', { method: 'POST', headers: { 'X-FV': '1' } }); db = null; query = ''; btcSummary = null; thumbCache.clear(); $('#search').value = ''; boot(); };
 $('#menu').onclick = () => $('.side').classList.toggle('open');
 $('#search').oninput = (e) => { query = e.target.value.trim(); render(); };
 $('#add-btn').onclick = () => dialog(`<h2>Add</h2><div class="list">
-  <div class="row" id="a1"><span class="ic">📄</span><div class="grow"><div class="t">Document</div><div class="s">Record with optional files, expiry date and notes</div></div></div>
-  <div class="row" id="a2"><span class="ic">📥</span><div class="grow"><div class="t">Upload files</div><div class="s">They land in the Inbox for review</div></div></div>
-  <div class="row" id="a3"><span class="ic">🧑</span><div class="grow"><div class="t">Person</div></div></div>
-  <div class="row" id="a4"><span class="ic">📇</span><div class="grow"><div class="t">Contact</div></div></div>
-  <div class="row" id="a5"><span class="ic">⏰</span><div class="grow"><div class="t">Reminder</div></div></div>
-  <div class="row" id="a6"><span class="ic">₿</span><div class="grow"><div class="t">Bitcoin address to track</div></div></div></div>
+  <div class="row" id="a1"><span class="th plain">📄</span><div class="grow"><div class="t">Document</div><div class="s">Record with optional files, expiry date and notes</div></div></div>
+  <div class="row" id="a2"><span class="th plain">📥</span><div class="grow"><div class="t">Upload files</div><div class="s">They land in the Inbox with a best-guess category and person</div></div></div>
+  <div class="row" id="a3"><span class="th plain">🧑</span><div class="grow"><div class="t">Person</div></div></div>
+  <div class="row" id="a4"><span class="th plain">📇</span><div class="grow"><div class="t">Contact</div></div></div>
+  <div class="row" id="a5"><span class="th plain">⏰</span><div class="grow"><div class="t">Reminder</div></div></div>
+  <div class="row" id="a6"><span class="th plain">₿</span><div class="grow"><div class="t">Bitcoin wallet to track</div></div></div></div>
   <div class="btns"><button class="ghost" data-close>Close</button></div>`, (d) => {
   const pre = view.name === 'cat' ? { category: view.cat } : view.name === 'person' ? { personId: view.id } : {};
   $('#a1', d).onclick = () => itemDialog(null, pre);
-  $('#a2', d).onclick = () => { d.close(); pickFiles((l) => ingest(l)); };
+  $('#a2', d).onclick = () => { d.close(); pickFiles((l) => ingest(l, view.name === 'person' ? { personId: view.id } : view.name === 'cat' ? { cat: view.cat } : {})); };
   $('#a3', d).onclick = () => personDialog();
   $('#a4', d).onclick = () => contactDialog();
   $('#a5', d).onclick = reminderDialog;

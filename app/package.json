@@ -1,12 +1,18 @@
 {
   "name": "family-vault",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A private, encrypted vault for your family's important documents, running on your Umbrel.",
   "main": "server.js",
   "license": "MIT",
-  "scripts": { "start": "node server.js" },
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
+    "@noble/hashes": "^1.8.0",
+    "@scure/base": "^1.2.6",
+    "@scure/bip32": "^1.7.0",
     "express": "^4.19.2",
+    "yauzl": "^3.4.0",
     "yazl": "^2.5.1"
   }
 }
