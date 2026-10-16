@@ -67,6 +67,8 @@ function lock() {
   state.db = null;
 }
 
+const LISTS = ['people', 'items', 'files', 'reminders', 'contacts', 'bitcoin', 'wallets'];
+const DEFAULT_SETTINGS = { btcLookups: true, btcApi: 'https://mempool.space/api' };
 const EMPTY_DB = () => ({
   rev: 0,
   people: [],
@@ -74,7 +76,18 @@ const EMPTY_DB = () => ({
   files: [],
   reminders: [],
   contacts: [],
+  bitcoin: [], // where wallets, accounts and seed phrases are kept (instructions, not secrets)
+  wallets: [], // tracked public addresses
+  settings: { ...DEFAULT_SETTINGS },
 });
+// Vaults created by older versions lack the newer lists: fill them in.
+function normalizeDb(d) {
+  const base = EMPTY_DB();
+  const out = { ...base, ...d };
+  for (const k of LISTS) if (!Array.isArray(out[k])) out[k] = [];
+  out.settings = { ...DEFAULT_SETTINGS, ...(d && d.settings) };
+  return out;
+}
 
 async function saveDb() {
   const blob = sealBuffer(state.key, Buffer.from(JSON.stringify(state.db)));
@@ -84,7 +97,7 @@ async function saveDb() {
 async function loadDb(key) {
   try {
     const blob = await fsp.readFile(DB_FILE);
-    return JSON.parse(openBuffer(key, blob).toString('utf8'));
+    return normalizeDb(JSON.parse(openBuffer(key, blob).toString('utf8')));
   } catch (e) {
     if (e.code === 'ENOENT') return EMPTY_DB();
     throw e;
@@ -193,15 +206,75 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
+function cleanSettings(s) {
+  const out = { ...DEFAULT_SETTINGS };
+  if (s && typeof s === 'object') {
+    out.btcLookups = s.btcLookups !== false;
+    try {
+      const u = new URL(String(s.btcApi || DEFAULT_SETTINGS.btcApi));
+      if (u.protocol === 'http:' || u.protocol === 'https:') out.btcApi = u.toString().replace(/\/+$/, '');
+    } catch {}
+  }
+  return out;
+}
+
 app.get('/api/db', (_req, res) => res.json(state.db));
+
+// ---------- bitcoin balance lookups ----------
+// Only public addresses are ever sent, and only to the API address in Settings (default: mempool.space;
+// point it at your own Mempool node on Umbrel to keep lookups private).
+const ADDR_RE = /^(bc1[ac-hj-np-z02-9]{11,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/i;
+const btcCache = new Map(); // key -> {t, v}
+async function getJson(url) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 8000);
+  try {
+    const r = await fetch(url, { signal: ac.signal, headers: { Accept: 'application/json' } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function cached(key, fn, ttl = 60000) {
+  const hit = btcCache.get(key);
+  if (hit && Date.now() - hit.t < ttl) return hit.v;
+  const v = await fn();
+  btcCache.set(key, { t: Date.now(), v });
+  return v;
+}
+app.get('/api/btc/summary', async (_req, res) => {
+  const st = state.db.settings;
+  const out = { enabled: st.btcLookups, source: st.btcApi, price: null, wallets: [], at: Date.now() };
+  if (!st.btcLookups) return res.json(out);
+  try {
+    out.price = await cached(`${st.btcApi}|price`, async () => (await getJson(`${st.btcApi}/v1/prices`)).USD || null);
+  } catch {}
+  out.wallets = await Promise.all(
+    state.db.wallets.slice(0, 50).map(async (w) => {
+      const addr = String(w.address || '').trim();
+      if (!ADDR_RE.test(addr)) return { id: w.id, error: 'Not a valid Bitcoin address.' };
+      try {
+        const j = await cached(`${st.btcApi}|${addr}`, () => getJson(`${st.btcApi}/address/${encodeURIComponent(addr)}`));
+        const c = j.chain_stats || {}, m = j.mempool_stats || {};
+        const confirmed = (c.funded_txo_sum || 0) - (c.spent_txo_sum || 0);
+        const pending = (m.funded_txo_sum || 0) - (m.spent_txo_sum || 0);
+        return { id: w.id, confirmed, pending, txCount: (c.tx_count || 0) + (m.tx_count || 0) };
+      } catch (e) {
+        return { id: w.id, error: 'Lookup failed. Check the API address in Settings.' };
+      }
+    })
+  );
+  res.json(out);
+});
 
 app.put('/api/db', async (req, res) => {
   const b = req.body || {};
-  const lists = ['people', 'items', 'files', 'reminders', 'contacts'];
-  if (!lists.every((k) => Array.isArray(b[k]))) return res.status(400).json({ error: 'Invalid data.' });
+  if (!LISTS.every((k) => Array.isArray(b[k]))) return res.status(400).json({ error: 'Invalid data.' });
   if (b.rev !== state.db.rev) return res.status(409).json({ error: 'The vault changed in another window. Reload to continue.' });
   const next = { rev: state.db.rev + 1 };
-  for (const k of lists) next[k] = b[k];
+  for (const k of LISTS) next[k] = b[k];
+  next.settings = cleanSettings(b.settings);
   state.db = next;
   await saveDb();
   collectGarbage();

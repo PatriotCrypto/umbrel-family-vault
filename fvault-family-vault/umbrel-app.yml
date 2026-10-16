@@ -2,7 +2,7 @@ manifestVersion: 1
 id: fvault-family-vault
 category: files
 name: Family Vault
-version: "0.1.1"
+version: "0.2.0"
 tagline: A private, encrypted home for your family's important documents
 description: >-
   Family Vault keeps your family's important papers in one place that only you control: passports, insurance policies,
@@ -25,7 +25,7 @@ port: 3921
 gallery: []
 path: ""
 releaseNotes: >-
-  Fixes the app not starting because of data folder permissions.
+  New look with four themes (including dark and 8-bit), a new icon, profile pictures, a Bitcoin page with a live wallet tracker, an emergency sheet and a password generator.
 submitter: PatriotCrypto
 submission: https://github.com/PatriotCrypto/umbrel-family-vault
 dependencies: []

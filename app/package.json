@@ -1,6 +1,6 @@
 {
   "name": "family-vault",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A private, encrypted vault for your family's important documents, running on your Umbrel.",
   "main": "server.js",
   "license": "MIT",
