@@ -25,7 +25,7 @@ Your passports, insurance policies, tax returns, wills and medical records stay 
 
 **Bitcoin**
 - A page for recording where wallets, accounts and recovery instructions are kept (describe where seed phrases are; never type them in)
-- Track balances by public address or by wallet key (xpub, ypub or zpub), with transaction counts. Seed phrases and private keys are rejected.
+- Track balances by public address or by wallet key (xpub, ypub or zpub), with transaction counts. The wallet tracker rejects seed phrases and private keys, but the free-text notes fields cannot tell what you type, so never put a seed phrase anywhere in the vault.
 - Lookups use mempool.space by default. Point them at your own Mempool node for full privacy, or turn them off.
 
 **Everything else**
@@ -40,12 +40,14 @@ Your passports, insurance policies, tax returns, wills and medical records stay 
 - Changing your passphrase is instant and safe, because only the master key's lock is replaced.
 - The passphrase is never stored, and the master key lives in memory only while the vault is unlocked. **If you forget the passphrase, the data cannot be recovered.**
 - Each browser gets its own session. Requests are protected against cross-site forgery, and a strict content security policy is applied.
-- The container runs with a read-only filesystem, all Linux capabilities dropped except the three it needs at start-up, and no new privileges.
+- The Umbrel install runs the container with a read-only filesystem, all Linux capabilities dropped except the three it needs at start-up, and no new privileges.
 - Previews are drawn in your browser. Thumbnails are kept in memory only and never saved to disk.
-- Everything lives in the app's data folder on your Umbrel: `meta.json` (the wrapped key and settings), `vault.db` and `files/*.bin`, all encrypted except the small `meta.json` and the optional ntfy settings described below.
+- Everything lives in the app's data folder on your Umbrel: `meta.json` (the wrapped key and settings), `vault.db` and `files/*.bin`. Records, file names and file contents are encrypted. Not hidden: the number and sizes of your files, and the small `meta.json` and ntfy files described below.
 
 **Things to know**
-- Alerts through ntfy work while the vault is locked, so a small schedule (dates and generic labels; titles only if you opt in) is kept unencrypted. Anyone who knows your ntfy topic can read your alerts on a public ntfy server, so keep the topic secret or use your own server.
+- While the vault is unlocked, the decryption key is in the app's memory, so anyone with administrator access to your Umbrel could read it. Lock the vault when you are not using it, and rely on auto-lock.
+- There is one shared passphrase for the whole vault. There are no separate logins per family member and no two-factor sign-in yet.
+- Alerts through ntfy work while the vault is locked, so a small schedule (dates and generic labels; titles only if you opt in) is kept unencrypted, along with your ntfy server, topic and access token if you set one. Anyone who knows your ntfy topic can read your alerts on a public ntfy server, so keep the topic secret or use your own server.
 - Tracking a wallet key lets the lookup server see all of that wallet's addresses.
 - This project has not been independently audited. Use a long passphrase (five or more random words is a good choice) and keep backups somewhere other than the Umbrel itself.
 
