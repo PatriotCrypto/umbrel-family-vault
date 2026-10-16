@@ -268,3 +268,30 @@ dialog.wide .pvcol{order:0}
 .chip input{width:auto}
 .addr{word-break:break-all;font-family:ui-monospace,monospace;font-size:.8em}
 .bal{text-align:right;min-width:120px}
+
+/* 0.4.0: tiles, quick views, layout toggle */
+.hbtns{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.seg{display:inline-flex;border:var(--bw) solid var(--line);border-radius:var(--btn-r);overflow:hidden}
+.seg button{border:0!important;border-radius:0!important;box-shadow:none!important;background:transparent;padding:6px 12px;transform:none}
+.seg button.on{background:var(--accent)!important;color:var(--accent-ink)!important}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px}
+.tile{background:var(--panel);border:var(--bw) solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow-s);overflow:hidden;cursor:pointer;display:flex;flex-direction:column}
+.tile:hover{transform:translateY(-2px)}
+.tile-th{height:150px;background:var(--panel2);display:flex;align-items:center;justify-content:center;font-size:2.6em;overflow:hidden;border-bottom:1px solid var(--soft)}
+.tile-th img{width:100%;height:100%;object-fit:cover;object-position:top}
+.tile-th.plain{height:110px}
+.tile-b{padding:10px 12px;display:flex;flex-direction:column;gap:2px;flex:1}
+.tile-b .t{font-weight:700;line-height:1.25}
+.tile-f{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:auto;padding-top:8px}
+.tile.miss{border-style:dashed;box-shadow:none;opacity:.85}
+.small{padding:3px 10px;font-size:.85em}
+button.renew{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.qv{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0}
+.chip-btn{border-radius:99px;padding:5px 12px;font-size:.9em}
+.count2{display:inline-block;min-width:20px;text-align:center;border-radius:99px;background:var(--soft);color:var(--ink);font-size:.8em;padding:0 6px;margin-left:2px}
+[data-theme="retro"] .tile,[data-theme="8bit"] .tile{border-radius:0}
+[data-theme="retro"] #view .tile{color:#000}
+[data-theme="retro"] #view .tile .muted,[data-theme="retro"] #view .tile .s{color:#404040}
+[data-theme="classic"] .tile{box-shadow:none}
+[data-theme="classic"] .tile:hover{box-shadow:0 4px 14px rgba(0,0,0,.08)}
+@media(max-width:600px){.tiles{grid-template-columns:repeat(2,1fr);gap:10px}.tile-th{height:120px}}

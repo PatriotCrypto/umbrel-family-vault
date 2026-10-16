@@ -2,7 +2,7 @@ manifestVersion: 1
 id: fvault-family-vault
 category: files
 name: Family Vault
-version: "0.3.0"
+version: "0.4.0"
 tagline: A private, encrypted home for your family's important documents
 description: >-
   Family Vault keeps your family's important papers in one place that only you control: passports, insurance policies,
@@ -25,7 +25,7 @@ port: 3921
 gallery: []
 path: ""
 releaseNotes: >-
-  Stronger encryption (random master key, instant passphrase changes, upgrade button for existing vaults), file previews and thumbnails, documents grouped by family member, smart category and person suggestions from file names, whole-wallet Bitcoin tracking with xpub/ypub/zpub, ntfy phone alerts, a Classic theme and a family name on the home page.
+  Renew button for expiring documents (new date plus replacement file or photo), tile view for documents and reminders with a tiles/rows switch, quick views that show everyone's Birth Certificate, Passports, License or Social Security Card at once, custom categories (Employment removed from the defaults), and a fix so new attachments preview before saving.
 submitter: PatriotCrypto
 submission: https://github.com/PatriotCrypto/umbrel-family-vault
 dependencies: []

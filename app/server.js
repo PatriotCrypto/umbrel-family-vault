@@ -271,6 +271,16 @@ function cleanSettings(s) {
   const out = { ...DEFAULT_SETTINGS };
   if (s && typeof s === 'object') {
     out.btcLookups = s.btcLookups !== false;
+    if (Array.isArray(s.categories)) {
+      const seen = new Set(), cats = [];
+      for (const c of s.categories.slice(0, 40)) {
+        const name = String((c && c.name) || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 30);
+        if (!name || seen.has(name.toLowerCase())) continue;
+        seen.add(name.toLowerCase());
+        cats.push({ name, icon: String((c && c.icon) || '').replace(/[\u0000-\u001f<>&"']/g, '').trim().slice(0, 8) || '📁' });
+      }
+      if (cats.length) out.categories = cats;
+    }
     out.familyName = typeof s.familyName === 'string' ? s.familyName.replace(/[\u0000-\u001f]/g, '').trim().slice(0, 60) : '';
     try {
       const u = new URL(String(s.btcApi || DEFAULT_SETTINGS.btcApi));

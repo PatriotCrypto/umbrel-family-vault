@@ -1,6 +1,23 @@
 'use strict';
-const CATS = ['Family','Finance','Property','Passwords','Insurance','Tax','Legal','Business','Employment','Family Resources'];
-const CAT_ICON = { Family:'👪', Finance:'💰', Property:'🏠', Passwords:'🔑', Insurance:'🛡️', Tax:'🧾', Legal:'⚖️', Business:'💼', Employment:'👔', 'Family Resources':'📚' };
+const BASE_CATS = [['Family','👪'],['Finance','💰'],['Property','🏠'],['Passwords','🔑'],['Insurance','🛡️'],['Tax','🧾'],['Legal','⚖️'],['Business','💼'],['Family Resources','📚']];
+const PROTECTED_CATS = ['Family', 'Passwords'];
+const CATS = [], CAT_ICON = {};
+function syncCats() {
+  const st = (db && db.settings) || {};
+  let list = st.categories && st.categories.length ? st.categories.map((c) => ({ name: c.name, icon: c.icon })) : BASE_CATS.map(([name, icon]) => ({ name, icon }));
+  for (const n of PROTECTED_CATS) if (!list.some((c) => c.name === n)) list.unshift({ name: n, icon: BASE_CATS.find((b) => b[0] === n)[1] });
+  if (db) for (const i of db.items) if (i.category && !list.some((c) => c.name === i.category)) list.push({ name: i.category, icon: i.category === 'Employment' ? '👔' : '📁' });
+  CATS.length = 0; for (const k of Object.keys(CAT_ICON)) delete CAT_ICON[k];
+  for (const c of list) { CATS.push(c.name); CAT_ICON[c.name] = c.icon; }
+}
+const KINDS = [
+  { id: 'birth', label: 'Birth Certificate', icon: '📜', re: /birth/i },
+  { id: 'passbook', label: 'Passport Book', icon: '📘', re: /passport(?!.*card)/i },
+  { id: 'passcard', label: 'Passport Card', icon: '🪪', re: /passport.*card/i },
+  { id: 'dl', label: "Driver's License / Permit", icon: '🚗', re: /driver|\bdl\b|learner|\bpermit\b/i },
+  { id: 'ssn', label: 'Social Security Card', icon: '🔢', re: /social security|\bssn\b/i },
+];
+const docKind = (i) => (i.category === 'Family' ? (KINDS.find((k) => k.re.test(i.title)) || {}).id || '' : '');
 const HINTS = {
   Family:['birth certificate','birth','passport','driver','drivers','license','licence','social security','ssn','marriage','certificate','vaccination','vaccine','immunization','medical','school','report card','faa','handgun','concealed','carry','state id','id card','visa','citizenship','military','dd214','dd 214','records'],
   Finance:['bank','statement','invoice','receipt','loan','mortgage','401k','ira','brokerage','investment','credit','savings','checking','crypto','wallet','kraken','robinhood','coinbase','balance','deposit'],
@@ -9,7 +26,6 @@ const HINTS = {
   Tax:['tax','1040','w2','w 2','1099','irs','return','k 1','taxes'],
   Legal:['will','trust','power of attorney','poa','contract','court','agreement','divorce','estate','directive','lawsuit','notary','living will'],
   Business:['llc','business','incorporation','ein','corp','articles','operating agreement','s corp'],
-  Employment:['resume','offer letter','payroll','paystub','pay stub','employment','benefits','w4','w 4','i9','i 9','job'],
 };
 const BTC_KINDS = ['Hardware wallet','Software wallet','Exchange account','Seed phrase backup','Passphrase / PIN hint','Inheritance instructions','Other'];
 const THEMES = [
@@ -44,7 +60,7 @@ async function api(url, opts = {}) {
   if (!r.ok) throw new Error((data && data.error) || 'Something went wrong.');
   return data;
 }
-async function save() { const r = await api('/api/db', { method: 'PUT', json: db }); db.rev = r.rev; }
+async function save() { const r = await api('/api/db', { method: 'PUT', json: db }); db.rev = r.rev; syncCats(); for (const f of db.files) localFiles.delete(f.id); }
 
 // ---------- passphrase strength ----------
 function strength(p) {
@@ -73,7 +89,7 @@ function meterBind(root, input) {
 async function boot() {
   S = await api('/api/status');
   if (S.unlocked) {
-    db = await api('/api/db');
+    db = await api('/api/db'); syncCats();
     $('#gate').classList.add('hidden'); $('#app').classList.remove('hidden');
     render();
     if (S.upgrade && S.upgrade.running) upgradeProgress();
@@ -153,7 +169,8 @@ function guessCategory(name) {
     for (const w of words) if (n.includes(' ' + w + ' ') || n.includes(' ' + w + 's ')) sc += w.includes(' ') ? 3 : 2;
     if (sc > top) { best = c; top = sc; }
   }
-  return best || 'Family Resources';
+  for (const c of CATS) { if (HINTS[c]) continue; const w = norm(c).trim(); if (w.length >= 3 && n.includes(' ' + w + ' ') && 4 > top) { best = c; top = 4; } }
+  return CATS.includes(best) ? best : (CATS.includes('Family Resources') ? 'Family Resources' : CATS[0]);
 }
 function guessPerson(name) {
   const n = norm(name); let best = '', top = 0, tie = false;
@@ -169,6 +186,9 @@ function guessPerson(name) {
 const cleanTitle = (name) => name.replace(/\.[^.]+$/, '').replace(/_/g, ' ').trim();
 
 // ---------- thumbnails and previews (everything is decrypted by the server and drawn here, in memory only) ----------
+const localFiles = new Map(); // files just attached but not saved yet: the server only serves files recorded in the vault
+const fileUrl = (id) => (localFiles.has(id) ? (localFiles.get(id).url ||= URL.createObjectURL(localFiles.get(id).file)) : '/api/files/' + id);
+const fetchFile = (id) => fetch(fileUrl(id));
 let pdfLib = null;
 async function pdfjs() {
   if (!pdfLib) { pdfLib = await import('/vendor/pdfjs/pdf.min.mjs'); pdfLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.mjs'; }
@@ -176,7 +196,7 @@ async function pdfjs() {
 }
 async function loadPdf(fid) {
   const lib = await pdfjs();
-  const buf = await (await fetch('/api/files/' + fid)).arrayBuffer();
+  const buf = await (await fetchFile(fid)).arrayBuffer();
   return lib.getDocument({ data: new Uint8Array(buf), standardFontDataUrl: '/vendor/pdfjs/standard_fonts/', isEvalSupported: false, enableXfa: false }).promise;
 }
 const isImg = (t) => /^image\/(png|jpe?g|gif|webp)$/.test(t || '');
@@ -192,11 +212,11 @@ function thumbPump() {
 async function makeThumb(rec) {
   const c = document.createElement('canvas');
   if (isImg(rec.type)) {
-    const bmp = await createImageBitmap(await (await fetch('/api/files/' + rec.id)).blob());
-    const s = 112 / Math.max(bmp.width, bmp.height); c.width = Math.max(1, Math.round(bmp.width * s)); c.height = Math.max(1, Math.round(bmp.height * s));
+    const bmp = await createImageBitmap(await (await fetchFile(rec.id)).blob());
+    const s = 200 / Math.max(bmp.width, bmp.height); c.width = Math.max(1, Math.round(bmp.width * s)); c.height = Math.max(1, Math.round(bmp.height * s));
     c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
   } else if (isPdf(rec.type)) {
-    const pdf = await loadPdf(rec.id), page = await pdf.getPage(1), v0 = page.getViewport({ scale: 1 }), s = 112 / Math.max(v0.width, v0.height), v = page.getViewport({ scale: s });
+    const pdf = await loadPdf(rec.id), page = await pdf.getPage(1), v0 = page.getViewport({ scale: 1 }), s = 200 / Math.max(v0.width, v0.height), v = page.getViewport({ scale: s });
     c.width = Math.round(v.width); c.height = Math.round(v.height);
     const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
     await page.render({ canvasContext: ctx, viewport: v }).promise; pdf.destroy();
@@ -213,15 +233,15 @@ function hydrateThumbs(root) {
     if (thumbCache.has(rec.id)) return put(thumbCache.get(rec.id));
     thumbQ.push({ rec, done: (u) => { thumbCache.set(rec.id, u); put(u); } }); thumbPump();
   }), { rootMargin: '200px' });
-  root.querySelectorAll('.th[data-fid]').forEach((el) => thumbObs.observe(el));
+  root.querySelectorAll('.th[data-fid],.tile-th[data-fid]').forEach((el) => thumbObs.observe(el));
 }
 async function buildPreview(host, rec) {
   host.innerHTML = '';
   if (!rec) { host.innerHTML = '<div class="empty">No file attached yet.</div>'; return; }
-  const url = '/api/files/' + rec.id;
+  const url = fileUrl(rec.id);
   const bar = `<div class="pv-bar"><b>${esc(rec.name)}</b><span class="muted">${fmtSize(rec.size)}</span><span class="grow"></span><a href="${url}" target="_blank" rel="noopener">Open</a> · <a href="${url}?dl=1">Download</a></div>`;
   if (isImg(rec.type)) host.innerHTML = bar + `<div class="pv-scroll"><img class="pv-img" src="${url}" alt=""></div>`;
-  else if (rec.type === 'text/plain') { host.innerHTML = bar + '<div class="pv-scroll"><pre class="pv-txt"></pre></div>'; $('.pv-txt', host).textContent = (await (await fetch(url)).text()).slice(0, 30000); }
+  else if (rec.type === 'text/plain') { host.innerHTML = bar + '<div class="pv-scroll"><pre class="pv-txt"></pre></div>'; $('.pv-txt', host).textContent = (await (await fetchFile(rec.id)).text()).slice(0, 30000); }
   else if (isPdf(rec.type)) {
     host.innerHTML = bar + '<div class="pv-scroll"><div class="pv-load muted">Loading preview…</div></div>';
     try {
@@ -255,7 +275,7 @@ function render() {
   renderNav();
   const v = $('#view');
   if (query) renderSearch(v);
-  else ({ home: renderHome, inbox: renderInbox, reminders: renderReminders, cat: renderCat, contacts: renderContacts, people: renderPeople, person: renderPerson, bitcoin: renderBitcoin, sheet: renderSheet, settings: renderSettings }[view.name] || renderHome)(v);
+  else ({ home: renderHome, inbox: renderInbox, reminders: renderReminders, cat: renderCat, kind: renderKind, contacts: renderContacts, people: renderPeople, person: renderPerson, bitcoin: renderBitcoin, sheet: renderSheet, settings: renderSettings }[view.name] || renderHome)(v);
   hydrateThumbs(v);
 }
 
@@ -273,19 +293,38 @@ function btcTotals(s) {
 }
 
 // ---------- list pieces ----------
+let layout = 'tiles'; try { layout = localStorage.getItem('fv-layout') || 'tiles'; } catch {}
+const layoutToggle = () => `<div class="seg"><button data-lay="tiles" class="${layout === 'tiles' ? 'on' : ''}">▦ Tiles</button><button data-lay="rows" class="${layout === 'rows' ? 'on' : ''}">☰ Rows</button></div>`;
+function bindLayout(root) { root.querySelectorAll('[data-lay]').forEach((b) => (b.onclick = () => { layout = b.dataset.lay; try { localStorage.setItem('fv-layout', layout); } catch {} render(); })); }
+const needsRenew = (i) => !!i.expires && daysUntil(i.expires) <= 60;
+const renewBtn = (i) => (needsRenew(i) ? `<button class="small renew" data-renew="${i.id}">Renew</button>` : '');
+const firstFile = (i) => (i.files || []).map(fileOf).find(Boolean);
 function itemRow(i, opts = {}) {
-  const p = person(i.personId), f = (i.files || []).map(fileOf).find(Boolean);
+  const p = person(i.personId), f = firstFile(i);
   const th = f && (isImg(f.type) || isPdf(f.type)) ? `<span class="th" data-fid="${esc(f.id)}">${CAT_ICON[i.category] || '📄'}</span>` : `<span class="th plain">${CAT_ICON[i.category] || '📄'}</span>`;
   return `<div class="row" data-item="${i.id}">${th}<div class="grow"><div class="t">${esc(i.title)}</div>
-    <div class="s">${opts.noCat ? '' : esc(i.category)}${p && !opts.noPerson ? (opts.noCat ? '' : ' · ') + esc(p.name) : ''}${i.files && i.files.length ? ((opts.noCat && (!p || opts.noPerson)) ? '' : ' · ') + i.files.length + ' file' + (i.files.length > 1 ? 's' : '') : ''}</div></div>${i.expires ? dueBadge(i.expires) : ''}</div>`;
+    <div class="s">${opts.noCat ? '' : esc(i.category)}${p && !opts.noPerson ? (opts.noCat ? '' : ' · ') + esc(p.name) : ''}${i.files && i.files.length ? ((opts.noCat && (!p || opts.noPerson)) ? '' : ' · ') + i.files.length + ' file' + (i.files.length > 1 ? 's' : '') : ''}</div></div>${i.expires ? dueBadge(i.expires) : ''}${renewBtn(i)}</div>`;
 }
-function bindItems(root) { root.querySelectorAll('[data-item]').forEach((e) => (e.onclick = () => itemDialog(db.items.find((i) => i.id === e.dataset.item)))); }
+function itemTile(i, opts = {}) {
+  const p = person(i.personId), f = firstFile(i);
+  const media = f && (isImg(f.type) || isPdf(f.type)) ? `<div class="tile-th" data-fid="${esc(f.id)}">${CAT_ICON[i.category] || '📄'}</div>` : `<div class="tile-th plain">${CAT_ICON[i.category] || '📄'}</div>`;
+  const sub = [opts.noCat ? '' : i.category, p && !opts.noPerson ? p.name : ''].filter(Boolean).join(' · ');
+  return `<div class="tile" data-item="${i.id}">${media}<div class="tile-b"><div class="t">${esc(i.title)}</div>${sub ? `<div class="s">${esc(sub)}</div>` : ''}<div class="tile-f">${i.expires ? dueBadge(i.expires) : '<span></span>'}${renewBtn(i)}</div></div></div>`;
+}
+function itemList(items, opts = {}) {
+  if (!items.length) return '';
+  return layout === 'tiles' ? `<div class="tiles">${items.map((i) => itemTile(i, opts)).join('')}</div>` : `<div class="list">${items.map((i) => itemRow(i, opts)).join('')}</div>`;
+}
+function bindItems(root) {
+  root.querySelectorAll('[data-item]').forEach((e) => (e.onclick = () => itemDialog(db.items.find((i) => i.id === e.dataset.item))));
+  root.querySelectorAll('[data-renew]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); renewDialog(db.items.find((i) => i.id === b.dataset.renew)); }));
+}
 function groupHead(p, n) { return `<div class="grp">${p ? avatar(p, 'sm') : '<div class="avatar sm fam">👪</div>'}<b>${esc(p ? p.name : 'Whole family')}</b><span class="muted">${n} item${n === 1 ? '' : 's'}</span></div>`; }
 function byPerson(items) {
   const groups = db.people.map((p) => [p, items.filter((i) => i.personId === p.id)]).filter(([, l]) => l.length);
   const rest = items.filter((i) => !i.personId || !person(i.personId));
   if (rest.length) groups.push([null, rest]);
-  return groups.map(([p, l]) => groupHead(p, l.length) + `<div class="list">${l.map((i) => itemRow(i, { noCat: true, noPerson: true })).join('')}</div>`).join('');
+  return groups.map(([p, l]) => groupHead(p, l.length) + itemList(l, { noCat: true, noPerson: true })).join('');
 }
 
 // ---------- views ----------
@@ -302,13 +341,14 @@ function renderHome(v) {
     </div>
     ${n ? `<div class="suggest" style="margin-top:14px"><div class="grow"><b>${n} new file${n > 1 ? 's' : ''} to review</b><div class="muted">Check the suggested category and person, then accept.</div></div><button class="primary" id="gi">Review</button></div>` : ''}
     <div class="drop" id="drop">Drop files here or click to upload</div>
+    <h3>Quick views</h3>${quickLinks()}
     <h3>Coming up</h3><div class="list">${up.length ? up.map((u) => `<div class="row"><span class="th plain">⏰</span><div class="grow"><div class="t">${esc(u.title)}</div></div>${dueBadge(u.date)}</div>`).join('') : '<div class="empty">Nothing due. Add an expiry date to a document or create a reminder.</div>'}</div>
     <h3>People</h3><div class="cards">${db.people.map(personCard).join('')}<div class="card" id="addp" style="display:flex;align-items:center;justify-content:center;color:var(--mute)">+ Add a person</div></div>
     <h3>Recently added</h3><div class="list">${recent.length ? recent.map((i) => itemRow(i)).join('') : '<div class="empty">No documents yet.</div>'}</div>`;
   if ($('#gi')) $('#gi').onclick = () => go({ name: 'inbox' });
   if ($('#up1')) $('#up1').onclick = upgradeDialog;
   $('#addp').onclick = () => personDialog();
-  bindPersonCards(v); bindItems(v); bindDrop($('#drop'));
+  bindPersonCards(v); bindItems(v); bindQuick(v); bindDrop($('#drop'));
   if (db.wallets.length) {
     $('#btc-home').onclick = () => go({ name: 'bitcoin' });
     loadBtc().then((s) => {
@@ -318,17 +358,33 @@ function renderHome(v) {
     });
   }
 }
+const quickLinks = () => `<div class="qv"><span class="muted">Quick views:</span>${KINDS.map((k) => `<button class="chip-btn" data-kind="${k.id}">${k.icon} ${esc(k.label)} <span class="count2">${db.items.filter((i) => i.reviewed !== false && docKind(i) === k.id).length}</span></button>`).join('')}</div>`;
+function bindQuick(root) { root.querySelectorAll('[data-kind]').forEach((b) => (b.onclick = () => go({ name: 'kind', kind: b.dataset.kind }))); }
 const personCard = (p) => `<div class="card" data-person="${p.id}">${avatar(p)}<div class="t">${esc(p.name)}</div><div class="muted">${db.items.filter((i) => i.personId === p.id).length} items</div></div>`;
 function bindPersonCards(r) { r.querySelectorAll('[data-person]').forEach((e) => (e.onclick = () => go({ name: 'person', id: e.dataset.person }))); }
 
 function renderCat(v) {
   const items = db.items.filter((i) => i.category === view.cat && i.reviewed !== false);
-  v.innerHTML = `<div class="head"><h2>${CAT_ICON[view.cat]} ${esc(view.cat)}</h2><button class="primary" id="a">+ Add to ${esc(view.cat)}</button></div>
+  v.innerHTML = `<div class="head"><h2>${CAT_ICON[view.cat]} ${esc(view.cat)}</h2><div class="hbtns">${layoutToggle()}<button class="primary" id="a">+ Add to ${esc(view.cat)}</button></div></div>
     <div class="muted">${view.cat === 'Passwords' ? 'Logins are stored inside the encrypted vault. ' : ''}Grouped by family member.</div>
+    ${view.cat === 'Family' ? quickLinks() : ''}
     <div class="drop" id="drop" style="margin-top:12px">Drop files here to add to ${esc(view.cat)}</div>
     ${items.length ? byPerson(items) : '<div class="list"><div class="empty">Nothing here yet.</div></div>'}`;
   $('#a').onclick = () => itemDialog(null, { category: view.cat });
-  bindItems(v); bindDrop($('#drop'), { cat: view.cat });
+  bindItems(v); bindLayout(v); bindQuick(v); bindDrop($('#drop'), { cat: view.cat });
+}
+
+function renderKind(v) {
+  const k = KINDS.find((x) => x.id === view.kind); if (!k) return go({ name: 'home' });
+  const items = db.items.filter((i) => i.reviewed !== false && docKind(i) === k.id).sort((a, b) => db.people.findIndex((p) => p.id === a.personId) - db.people.findIndex((p) => p.id === b.personId));
+  const missing = db.people.filter((p) => !items.some((i) => i.personId === p.id));
+  v.innerHTML = `<div class="head"><div><h2>${k.icon} ${esc(k.label)}s</h2><div class="muted">Everyone's ${esc(k.label.toLowerCase())} in one place. <a href="#" id="back">Back to Family</a></div></div>${layoutToggle()}</div>
+    ${quickLinks()}
+    ${items.length ? itemList(items, { noCat: true }) : '<div class="list"><div class="empty">None filed yet.</div></div>'}
+    ${missing.length ? `<h3>Not on file yet</h3><div class="tiles">${missing.map((p) => `<div class="tile miss" data-miss="${p.id}"><div class="tile-th plain">${avatar(p)}</div><div class="tile-b"><div class="t">${esc(p.name)}</div><div class="s">No ${esc(k.label)} yet</div><div class="tile-f"><span></span><button class="small">+ Add</button></div></div></div>`).join('')}</div>` : ''}`;
+  $('#back').onclick = (e) => { e.preventDefault(); go({ name: 'cat', cat: 'Family' }); };
+  v.querySelectorAll('[data-miss]').forEach((e) => (e.onclick = () => itemDialog(null, { category: 'Family', personId: e.dataset.miss, title: `${person(e.dataset.miss).name}'s ${k.label}` })));
+  bindItems(v); bindLayout(v); bindQuick(v);
 }
 
 function renderInbox(v) {
@@ -351,18 +407,23 @@ function renderInbox(v) {
   if ($('#all')) $('#all').onclick = async () => { items.forEach((i) => (i.reviewed = true)); await save(); render(); };
 }
 
+function remTile(u) {
+  if (u.kind === 'item') return itemTile(db.items.find((i) => i.id === u.id), {});
+  return `<div class="tile rem" data-rid="${u.id}"><div class="tile-th plain">⏰</div><div class="tile-b"><div class="t">${esc(u.title)}</div><div class="s">Reminder</div><div class="tile-f">${dueBadge(u.date)}<button class="small chk">Done</button></div></div></div>`;
+}
+function remRow(u) {
+  if (u.kind === 'item') return itemRow(db.items.find((i) => i.id === u.id), {});
+  return `<div class="row" data-rid="${u.id}"><span class="th plain">⏰</span><div class="grow"><div class="t">${esc(u.title)}</div><div class="s">Reminder</div></div>${dueBadge(u.date)}<button class="small chk">Done</button></div>`;
+}
 function renderReminders(v) {
   const up = upcoming(), done = db.reminders.filter((r) => r.done);
-  v.innerHTML = `<div class="head"><h2>⏰ Reminders</h2><button class="primary" id="a">+ New reminder</button></div>
-    <div class="list">${up.length ? up.map((u) => `<div class="row" data-k="${u.kind}" data-id="${u.id}"><div class="grow"><div class="t">${esc(u.title)}</div><div class="s">${u.kind === 'item' ? 'From a document expiry date' : 'Reminder'}</div></div>${dueBadge(u.date)}${u.kind === 'rem' ? '<button class="small chk">Done</button>' : ''}</div>`).join('') : '<div class="empty">No reminders.</div>'}</div>
+  const buckets = [['Overdue', (u) => daysUntil(u.date) < 0], ['Next 30 days', (u) => daysUntil(u.date) >= 0 && daysUntil(u.date) <= 30], ['Later', (u) => daysUntil(u.date) > 30]];
+  v.innerHTML = `<div class="head"><h2>⏰ Reminders</h2><div class="hbtns">${layoutToggle()}<button class="primary" id="a">+ New reminder</button></div></div>
+    ${up.length ? buckets.map(([name, fn]) => { const l = up.filter(fn); return l.length ? `<div class="grp"><b>${name}</b><span class="muted">${l.length}</span></div>${layout === 'tiles' ? `<div class="tiles">${l.map(remTile).join('')}</div>` : `<div class="list">${l.map(remRow).join('')}</div>`}` : ''; }).join('') : '<div class="list"><div class="empty">No reminders.</div></div>'}
     <p class="muted" style="font-size:.85em">Want a phone alert? Set up ntfy notifications in Settings.</p>
     ${done.length ? `<h3>Done</h3><div class="list">${done.map((r) => `<div class="row"><div class="grow s">${esc(r.title)} · ${fmtDate(r.date)}</div><button class="small danger del" data-id="${r.id}">Delete</button></div>`).join('')}</div>` : ''}`;
-  $('#a').onclick = reminderDialog;
-  v.querySelectorAll('.row[data-k]').forEach((el) => {
-    el.onclick = (e) => { if (e.target.closest('.chk')) return; if (el.dataset.k === 'item') itemDialog(db.items.find((i) => i.id === el.dataset.id)); };
-    const c = el.querySelector('.chk');
-    if (c) c.onclick = async () => { db.reminders.find((r) => r.id === el.dataset.id).done = true; await save(); render(); };
-  });
+  $('#a').onclick = reminderDialog; bindItems(v); bindLayout(v);
+  v.querySelectorAll('[data-rid]').forEach((el) => { const c = el.querySelector('.chk'); if (c) c.onclick = async () => { db.reminders.find((r) => r.id === el.dataset.rid).done = true; await save(); render(); }; });
   v.querySelectorAll('.del').forEach((b) => (b.onclick = async () => { db.reminders = db.reminders.filter((r) => r.id !== b.dataset.id); await save(); render(); }));
 }
 
@@ -383,11 +444,11 @@ function renderPerson(v) {
   const p = person(view.id); if (!p) return go({ name: 'people' });
   const items = db.items.filter((i) => i.personId === p.id && i.reviewed !== false);
   const groups = CATS.map((c) => [c, items.filter((i) => i.category === c)]).filter(([, l]) => l.length);
-  v.innerHTML = `<div class="head"><div class="hero">${avatar(p, 'lg')}<div><h2>${esc(p.name)}</h2><div class="muted">${p.birthday ? 'Born ' + fmtDate(p.birthday) : ''}${p.birthday && p.note ? ' · ' : ''}${esc(p.note || '')}</div></div></div><div><button id="e">Edit</button> <button class="primary" id="a">+ Add document</button></div></div>
+  v.innerHTML = `<div class="head"><div class="hero">${avatar(p, 'lg')}<div><h2>${esc(p.name)}</h2><div class="muted">${p.birthday ? 'Born ' + fmtDate(p.birthday) : ''}${p.birthday && p.note ? ' · ' : ''}${esc(p.note || '')}</div></div></div><div class="hbtns">${layoutToggle()}<button id="e">Edit</button> <button class="primary" id="a">+ Add document</button></div></div>
     <div class="drop" id="drop" style="margin-top:14px">Drop files here to add them for ${esc(p.name)}</div>
-    ${groups.length ? groups.map(([c, l]) => `<div class="grp"><span class="ic">${CAT_ICON[c]}</span><b>${esc(c)}</b><span class="muted">${l.length}</span></div><div class="list">${l.map((i) => itemRow(i, { noCat: true, noPerson: true })).join('')}</div>`).join('') : `<div class="list"><div class="empty">No documents filed for ${esc(p.name)} yet.</div></div>`}`;
+    ${groups.length ? groups.map(([c, l]) => `<div class="grp"><span class="ic">${CAT_ICON[c]}</span><b>${esc(c)}</b><span class="muted">${l.length}</span></div>${itemList(l, { noCat: true, noPerson: true })}`).join('') : `<div class="list"><div class="empty">No documents filed for ${esc(p.name)} yet.</div></div>`}`;
   $('#e').onclick = () => personDialog(p); $('#a').onclick = () => itemDialog(null, { personId: p.id });
-  bindItems(v); bindDrop($('#drop'), { personId: p.id });
+  bindItems(v); bindLayout(v); bindDrop($('#drop'), { personId: p.id });
 }
 
 function walletBalanceCell(w, r, s) {
@@ -465,6 +526,8 @@ async function renderSettings(v) {
   v.innerHTML = `<h2>⚙️ Settings</h2>
   <h3>Theme</h3><div class="list"><div class="themes">${THEMES.map((t) => `<button class="theme-opt ${curTheme() === t.id ? 'on' : ''}" data-t="${t.id}"><div class="sw">${t.sw.map((c) => `<i style="background:${c}"></i>`).join('')}</div><div class="nm">${t.name}</div></button>`).join('')}</div></div>
   <h3>Family</h3><div class="list"><div class="row" style="cursor:default;display:block"><label style="margin:0">Family name (shown on the home page)<input id="fn" maxlength="60" value="${esc(st.familyName || '')}" placeholder="e.g. Gump Family"></label><div class="btns"><button id="fns">Save</button></div></div></div>
+  <h3>Categories</h3><div class="list" id="catlist">${CATS.map((c) => `<div class="row" style="cursor:default"><span class="th plain">${esc(CAT_ICON[c])}</span><div class="grow"><div class="t">${esc(c)}</div><div class="s">${db.items.filter((i) => i.category === c).length} items</div></div>${PROTECTED_CATS.includes(c) ? '<span class="pill">built in</span>' : `<button class="small" data-ren="${esc(c)}">Rename</button><button class="small danger" data-delc="${esc(c)}">Delete</button>`}</div>`).join('')}
+    <div class="row" id="addcat"><span class="th plain">➕</span><div class="grow"><div class="t">Add a category</div><div class="s">For anything that doesn't fit the built-in ones, e.g. Medical, Pets, School.</div></div></div></div>
   <h3>Security</h3><div class="list"><div class="row" style="cursor:default"><div class="grow"><div class="t">Auto-lock</div><div class="s">Lock this browser after this much inactivity.</div></div>
     <select id="al" style="width:auto"><option value="5">5 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">1 hour</option><option value="240">4 hours</option><option value="0">Never</option></select></div>
     ${S.legacy ? `<div class="row" id="up2"><span class="th plain">⬆️</span><div class="grow"><div class="t">Upgrade encryption (recommended)</div><div class="s">Moves this vault to the stronger key setup. Keeps all your data.</div></div></div>`
@@ -487,7 +550,10 @@ async function renderSettings(v) {
   v.querySelectorAll('[data-t]').forEach((b) => (b.onclick = () => { setTheme(b.dataset.t); renderSettings(v); }));
   $('#al').value = String(S.autoLockMin);
   $('#al').onchange = async () => { try { await api('/api/settings', { method: 'POST', json: { autoLockMin: +$('#al').value } }); toast('Saved'); } catch (e) { toast(e.message); } };
-  const saveBtc = async () => { db.settings = { ...db.settings, btcLookups: $('#bl').checked, btcApi: $('#ba').value.trim() || 'https://mempool.space/api' }; try { await save(); db = await api('/api/db'); toast('Saved'); } catch (e) { toast(e.message); } };
+  const saveBtc = async () => { db.settings = { ...db.settings, btcLookups: $('#bl').checked, btcApi: $('#ba').value.trim() || 'https://mempool.space/api' }; try { await save(); db = await api('/api/db'); syncCats(); toast('Saved'); } catch (e) { toast(e.message); } };
+  $('#addcat').onclick = () => categoryDialog();
+  v.querySelectorAll('[data-ren]').forEach((b) => (b.onclick = () => categoryDialog(b.dataset.ren)));
+  v.querySelectorAll('[data-delc]').forEach((b) => (b.onclick = () => deleteCategoryDialog(b.dataset.delc)));
   $('#fns').onclick = async () => { db.settings = { ...db.settings, familyName: $('#fn').value.trim() }; try { await save(); db = await api('/api/db'); toast('Saved'); } catch (e) { toast(e.message); } };
   $('#bs').onclick = saveBtc; $('#bl').onchange = saveBtc;
   if ($('#up2')) $('#up2').onclick = upgradeDialog;
@@ -511,6 +577,67 @@ function genPassword(n = 20) {
   const set = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*-_=+';
   const a = new Uint32Array(n); crypto.getRandomValues(a);
   return [...a].map((x) => set[x % set.length]).join('');
+}
+
+async function saveCats(list, mutate) {
+  const prev = db.settings.categories, prevItems = db.items.map((i) => i.category);
+  db.settings = { ...db.settings, categories: list };
+  if (mutate) mutate();
+  try { await save(); } catch (e) { db.settings.categories = prev; db.items.forEach((i, n) => (i.category = prevItems[n])); syncCats(); throw e; }
+}
+const catObjs = () => CATS.map((name) => ({ name, icon: CAT_ICON[name] }));
+function categoryDialog(name) {
+  const cur = name ? { name, icon: CAT_ICON[name] } : { name: '', icon: '📁' };
+  dialog(`<h2>${name ? 'Rename category' : 'Add a category'}</h2><form id="f"><div class="grid2"><label>Name<input id="n" value="${esc(cur.name)}" required maxlength="30" placeholder="Medical, School, Pets…"></label><label>Icon (emoji)<input id="i" value="${esc(cur.icon)}" maxlength="4"></label></div><div class="err muted" id="e"></div><div class="btns"><button type="button" class="ghost" data-close>Cancel</button><button class="primary">Save</button></div></form>`, (d) => {
+    $('#f', d).onsubmit = async (e) => {
+      e.preventDefault();
+      const n = $('#n', d).value.trim(), icon = $('#i', d).value.trim() || '📁';
+      if (CATS.some((c) => c.toLowerCase() === n.toLowerCase() && c !== name)) return ($('#e', d).textContent = 'You already have a category with that name.');
+      const list = catObjs();
+      try {
+        if (name) { const c = list.find((x) => x.name === name); c.name = n; c.icon = icon; await saveCats(list, () => db.items.forEach((i) => { if (i.category === name) i.category = n; })); if (view.name === 'cat' && view.cat === name) view.cat = n; }
+        else { list.push({ name: n, icon }); await saveCats(list); }
+        d.close(); render();
+      } catch (x) { $('#e', d).textContent = x.message; }
+    };
+  });
+}
+function deleteCategoryDialog(name) {
+  const count = db.items.filter((i) => i.category === name).length, others = CATS.filter((c) => c !== name);
+  dialog(`<h2>Delete “${esc(name)}”?</h2><form id="f">${count ? `<p class="muted">${count} document${count > 1 ? 's are' : ' is'} in this category. Choose where to move ${count > 1 ? 'them' : 'it'}. Nothing is deleted.</p><label>Move to<select id="to">${opts(others.map((c) => [c, c]), others.includes('Family Resources') ? 'Family Resources' : others[0])}</select></label>` : '<p class="muted">This category is empty.</p>'}
+    <div class="err muted" id="e"></div><div class="btns"><button type="button" class="ghost" data-close>Cancel</button><button class="primary danger">Delete category</button></div></form>`, (d) => {
+    $('#f', d).onsubmit = async (e) => {
+      e.preventDefault();
+      const to = count ? $('#to', d).value : '';
+      try { await saveCats(catObjs().filter((c) => c.name !== name), () => db.items.forEach((i) => { if (i.category === name) i.category = to; })); if (view.name === 'cat' && view.cat === name) view = { name: 'home' }; d.close(); render(); }
+      catch (x) { $('#e', d).textContent = x.message; }
+    };
+  });
+}
+
+function renewDialog(it) {
+  let file = null;
+  dialog(`<h2>Renew</h2><p class="muted"><b>${esc(it.title)}</b>${it.expires ? ` · ${daysUntil(it.expires) < 0 ? 'expired' : 'expires'} ${fmtDate(it.expires)}` : ''}</p>
+    <form id="f"><label>New expiry date<input id="d" type="date" required min="${today()}"></label>
+    <label>Replacement document or photo <span class="muted">(optional)</span></label>
+    <div class="drop" id="pick" style="margin:0 0 10px">Choose a file or take a photo</div><div id="pk" class="muted" style="margin-bottom:8px"></div>
+    <label class="inl"><input type="checkbox" id="rm" style="width:auto"> Remove the old file${(it.files || []).length > 1 ? 's' : ''} (otherwise ${(it.files || []).length > 1 ? 'they' : 'it'} stay attached)</label>
+    <div class="err muted" id="e"></div><div class="btns"><button type="button" class="ghost" data-close>Cancel</button><button class="primary">Save renewal</button></div></form>`, (d) => {
+    const pick = () => { const i = document.createElement('input'); i.type = 'file'; i.accept = 'image/*,application/pdf'; i.onchange = () => { if (i.files[0]) { file = i.files[0]; $('#pk', d).textContent = `Selected: ${file.name} (${fmtSize(file.size)})`; } }; i.click(); };
+    $('#pick', d).onclick = pick;
+    $('#f', d).onsubmit = async (e) => {
+      e.preventDefault();
+      const btn = $('#f .primary', d); btn.disabled = true; $('#e', d).textContent = file ? 'Encrypting the new file…' : '';
+      try {
+        let rec = null;
+        if (file) { rec = await uploadOne(file); if (!rec) { btn.disabled = false; $('#e', d).textContent = 'The upload failed. Try again.'; return; } }
+        const old = it.files || [];
+        if (rec) { db.files.push(rec); it.files = [rec.id, ...(d.querySelector('#rm').checked ? [] : old)]; if (d.querySelector('#rm').checked) db.files = db.files.filter((f) => !old.includes(f.id) || f.id === rec.id); }
+        it.expires = $('#d', d).value; it.reviewed = true;
+        await save(); d.close(); render(); toast('Renewed');
+      } catch (x) { btn.disabled = false; $('#e', d).textContent = x.message; }
+    };
+  });
 }
 
 function changePassDialog() {
@@ -553,7 +680,7 @@ async function upgradeProgress() {
 
 function itemDialog(it, pre = {}) {
   const isNew = !it;
-  const x = it || { id: uid(), title: '', category: pre.category || 'Family Resources', personId: pre.personId || '', notes: '', expires: '', files: [], reviewed: true, created: today(), ...pre };
+  const x = it || { id: uid(), title: '', category: pre.category || (CATS.includes('Family Resources') ? 'Family Resources' : CATS[0]), personId: pre.personId || '', notes: '', expires: '', files: [], reviewed: true, created: today(), ...pre };
   const touched = { cat: !isNew || !!pre.category, who: !isNew || !!pre.personId, title: !isNew };
   dialog(`<div class="pvcol" id="pvcol"><div id="pvsel"></div><div id="pv"></div></div><div class="formcol"><h2>${isNew ? 'Add document' : 'Edit document'}</h2><form id="f">
     <label>Title<input id="title" value="${esc(x.title)}" required maxlength="140"></label>
@@ -573,7 +700,7 @@ function itemDialog(it, pre = {}) {
       $('#pvsel', d).innerHTML = recs.length > 1 ? `<select id="pvpick">${recs.map((r) => `<option value="${esc(r.id)}" ${r.id === shown ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select>` : '';
       if ($('#pvpick', d)) $('#pvpick', d).onchange = (e) => { shown = e.target.value; buildPreview($('#pv', d), fileOf(shown)); };
       if (recs.length && !recs.find((r) => r.id === shown)) { shown = recs[0].id; buildPreview($('#pv', d), recs[0]); }
-      $('#fl', d).innerHTML = recs.map((f) => `<a href="/api/files/${f.id}" target="_blank" rel="noopener"><span>${esc(f.name)}</span><span class="muted">${fmtSize(f.size)} <span data-rm="${f.id}" style="color:var(--bad)">remove</span></span></a>`).join('');
+      $('#fl', d).innerHTML = recs.map((f) => `<a href="${fileUrl(f.id)}" target="_blank" rel="noopener"><span>${esc(f.name)}</span><span class="muted">${fmtSize(f.size)} <span data-rm="${f.id}" style="color:var(--bad)">remove</span></span></a>`).join('');
       $('#fl', d).querySelectorAll('[data-rm]').forEach((s) => (s.onclick = (e) => { e.preventDefault(); e.stopPropagation(); x.files = x.files.filter((i) => i !== s.dataset.rm); drawFiles(); }));
     };
     drawFiles();
@@ -585,6 +712,7 @@ function itemDialog(it, pre = {}) {
     $('#att', d).onclick = () => pickFiles(async (list) => {
       for (const f of list) {
         const r = await uploadOne(f); if (!r) continue;
+        localFiles.set(r.id, { file: f });
         db.files.push(r); x.files.push(r.id);
         if (!touched.title) { $('#title', d).value = cleanTitle(f.name); touched.title = true; }          // best guesses from the file name
         if (!touched.cat) { $('#cat', d).value = guessCategory(f.name); $('#pwf', d).classList.toggle('hidden', $('#cat', d).value !== 'Passwords'); touched.cat = true; }
@@ -750,7 +878,7 @@ function bindDrop(el, ctx) {
 }
 
 // ---------- wiring ----------
-$('#lock-btn').onclick = async () => { await fetch('/api/lock', { method: 'POST', headers: { 'X-FV': '1' } }); db = null; query = ''; btcSummary = null; thumbCache.clear(); $('#search').value = ''; boot(); };
+$('#lock-btn').onclick = async () => { await fetch('/api/lock', { method: 'POST', headers: { 'X-FV': '1' } }); db = null; query = ''; btcSummary = null; thumbCache.clear(); localFiles.clear(); $('#search').value = ''; boot(); };
 $('#menu').onclick = () => $('.side').classList.toggle('open');
 $('#search').oninput = (e) => { query = e.target.value.trim(); render(); };
 $('#add-btn').onclick = () => dialog(`<h2>Add</h2><div class="list">
