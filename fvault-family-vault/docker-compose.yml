@@ -1,0 +1,18 @@
+version: "3.7"
+
+services:
+  app_proxy:
+    environment:
+      APP_HOST: fvault-family-vault_web_1
+      APP_PORT: 3000
+
+  web:
+    image: ghcr.io/patriotcrypto/family-vault:0.1.0@sha256:1820f2391be80f58f332a04428950da196513caa0602b544672d2a3616df394c
+    user: "1000:1000"
+    restart: on-failure
+    stop_grace_period: 1m
+    environment:
+      PORT: 3000
+      DATA_DIR: /data
+    volumes:
+      - ${APP_DATA_DIR}/data:/data

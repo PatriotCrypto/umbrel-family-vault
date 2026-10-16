@@ -1,0 +1,32 @@
+manifestVersion: 1
+id: fvault-family-vault
+category: files
+name: Family Vault
+version: "0.1.0"
+tagline: A private, encrypted home for your family's important documents
+description: >-
+  Family Vault keeps your family's important papers in one place that only you control: passports, insurance policies,
+  tax returns, wills, medical records, pet vaccination papers and more.
+
+
+  Organize documents by category (Family, Finance, Property, Insurance, Tax, Legal, Business, Employment) and by person or pet.
+  Drop files into the Inbox and confirm the suggested category with one click. Search everything, keep logins in the Passwords
+  category, store contacts like your attorney and doctor, and get reminders before documents expire.
+
+
+  Everything is encrypted with AES-256-GCM using a key derived from your own passphrase. The passphrase is never stored, so nobody,
+  including the server it runs on, can read your documents while the vault is locked. If you forget the passphrase, your documents cannot
+  be recovered, so keep it somewhere safe. A one-click encrypted backup is included.
+developer: PatriotCrypto
+website: https://github.com/PatriotCrypto/umbrel-family-vault
+repo: https://github.com/PatriotCrypto/umbrel-family-vault
+support: https://github.com/PatriotCrypto/umbrel-family-vault/issues
+port: 3921
+gallery: []
+path: ""
+releaseNotes: >-
+  First release.
+submitter: PatriotCrypto
+submission: https://github.com/PatriotCrypto/umbrel-family-vault
+dependencies: []
+icon: https://raw.githubusercontent.com/PatriotCrypto/umbrel-family-vault/main/fvault-family-vault/icon.svg
