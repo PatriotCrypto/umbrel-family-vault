@@ -10,7 +10,7 @@ Your passports, insurance policies, tax returns, wills and medical records stay 
 - Categories: Family, Finance, Property, Passwords, Insurance, Tax, Legal, Business and Family Resources, plus your own custom categories (add, rename or delete them in Settings)
 - Documents are grouped by family member, and each person has their own page with a profile photo
 - Tile view or row view, remembered between visits
-- Quick views: one click shows everyone's Birth Certificate, Passport Book, Passport Card, Driver's License / Permit or Social Security Card side by side, and flags who is missing one
+- Quick views: one click shows everyone's Birth Certificate, Passport Book, Passport Card, Driver's License or Social Security Card side by side, and flags who is missing one
 - Contacts for your attorney, doctor, accountant and others
 - Search across titles, notes, file names, people and contacts
 

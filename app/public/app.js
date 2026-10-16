@@ -14,7 +14,7 @@ const KINDS = [
   { id: 'birth', label: 'Birth Certificate', icon: '📜', re: /birth/i },
   { id: 'passbook', label: 'Passport Book', icon: '📘', re: /passport(?!.*card)/i },
   { id: 'passcard', label: 'Passport Card', icon: '🪪', re: /passport.*card/i },
-  { id: 'dl', label: "Driver's License / Permit", icon: '🚗', re: /driver|\bdl\b|learner|\bpermit\b/i },
+  { id: 'dl', label: "Driver's License", icon: '🚗', re: /\bdriver['’]?s?\s+(licen[sc]e|permit)/i },
   { id: 'ssn', label: 'Social Security Card', icon: '🔢', re: /social security|\bssn\b/i },
 ];
 const docKind = (i) => (i.category === 'Family' ? (KINDS.find((k) => k.re.test(i.title)) || {}).id || '' : '');
